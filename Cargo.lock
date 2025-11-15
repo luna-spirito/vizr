@@ -5304,6 +5304,7 @@ dependencies = [
  "egui",
  "egui_plot",
  "env_logger",
+ "futures",
  "regex",
  "serde",
  "serde_json",

@@ -8,6 +8,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 // Core
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +67,7 @@ pub struct Metadata {
     pub series_param_info: HashMap<String, Vec<String>>,
 }
 
+#[derive(Clone)]
 pub struct DataLoader {
     ctx: SessionContext,
     pub metadata: Metadata,

@@ -3,7 +3,7 @@ mod data_loader;
 mod filters;
 
 use clap::Parser;
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 #[derive(Parser)]
 #[command(name = "vizr")]
@@ -20,12 +20,11 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Loading parquet data from: {}", args.data_dir);
     let loader = data_loader::DataLoader::new(&args.data_dir).await?;
-    let metadata = loader.metadata.clone();
     println!(
         "Found {} precisions, {} series, {} accelerators",
-        metadata.precisions.len(),
-        metadata.series_names.len(),
-        metadata.accel_names.len()
+        loader.metadata.precisions.len(),
+        loader.metadata.series_names.len(),
+        loader.metadata.accel_names.len()
     );
 
     // Запускаем GUI
@@ -34,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
     eframe::run_native(
         "Vizr - Parquet Data Visualizer",
         options,
-        Box::new(|_cc| Box::new(app::DashboardApp::new(loader, metadata)) as Box<dyn eframe::App>),
+        Box::new(|_cc| Box::new(app::DashboardApp::new(Arc::new(loader))) as Box<dyn eframe::App>),
     )
     .map_err(|e| anyhow::anyhow!("GUI error: {}", e))?;
     Ok(())

@@ -1,13 +1,13 @@
-use eframe::egui;
-use egui_plot::{Line, Plot, PlotPoints, Points, MarkerShape};
-use crate::data_loader::{DataLoader, Metadata, DataItem};
+use crate::data_loader::{DataItem, DataLoader, Metadata};
 use crate::filters::Filters;
+use eframe::egui;
+use egui_plot::{Line, MarkerShape, Plot, PlotPoints, Points};
+use std::sync::{Arc, Mutex, mpsc};
 
 pub struct DashboardApp {
-    loader: DataLoader,
+    loader: Arc<DataLoader>,
     filters: Filters,
     data: Option<Vec<DataItem>>,
-    metadata: Metadata,
     // UI состояние
     show_precision: bool,
     show_series: bool,
@@ -20,15 +20,19 @@ pub struct DashboardApp {
     show_partial_sums: bool,
     show_limits: bool,
     show_imaginary: bool,
+    // Каналы для асинхронной загрузки данных
+    data_sender: Option<std::sync::mpsc::Sender<Result<Vec<DataItem>, anyhow::Error>>>,
+    data_receiver: Option<std::sync::mpsc::Receiver<Result<Vec<DataItem>, anyhow::Error>>>,
+    loading: bool,
 }
 
 impl DashboardApp {
-    pub fn new(loader: DataLoader, metadata: Metadata) -> Self {
+    pub fn new(loader: Arc<DataLoader>) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
         Self {
             loader,
             filters: Filters::default(),
             data: None,
-            metadata,
             show_precision: true,
             show_series: true,
             show_accel: true,
@@ -38,54 +42,81 @@ impl DashboardApp {
             show_partial_sums: true,
             show_limits: true,
             show_imaginary: true,
+            data_sender: Some(tx),
+            data_receiver: Some(rx),
+            loading: false,
         }
     }
 
     fn update_data(&mut self) {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(self.loader.filter_data(&self.filters));
-        match result {
-            Ok(data) => {
-                let len = data.len();
-                self.data = Some(data);
-                println!("Loaded {} items after filtering", len);
-            }
-            Err(e) => {
-                eprintln!("Error filtering data: {}", e);
-                self.data = None;
+        if let (Some(sender), _) = (&self.data_sender, &self.data_receiver) {
+            let filters = self.filters.clone();
+            let loader = self.loader.clone();
+            let tx = sender.clone();
+            
+            // Запускаем загрузку в отдельном потоке
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let result = rt.block_on(loader.filter_data(&filters));
+                let _ = tx.send(result);
+            });
+            
+            self.loading = true;
+        }
+    }
+
+    fn check_for_data(&mut self) {
+        if let Some(receiver) = &self.data_receiver {
+            if let Ok(result) = receiver.try_recv() {
+                match result {
+                    Ok(data) => {
+                        let len = data.len();
+                        self.data = Some(data);
+                        println!("Loaded {} items after filtering", len);
+                    }
+                    Err(e) => {
+                        eprintln!("Error filtering data: {}", e);
+                        self.data = None;
+                    }
+                }
+                self.loading = false;
             }
         }
     }
 
     fn format_item_name(&self, item: &DataItem) -> String {
         let mut name = format!("{} (m={}) ", item.accel.name, item.accel.m_value);
-        
+
         // Add accel parameters
         if !item.accel.additional_args.is_empty() {
-            let params: Vec<String> = item.accel.additional_args
+            let params: Vec<String> = item
+                .accel
+                .additional_args
                 .iter()
                 .map(|(k, v)| format!("{}={}", k, v))
                 .collect();
             name.push_str(&format!("({}) ", params.join(", ")));
         }
-        
+
         name.push_str(&item.series.name);
-        
+
         // Add series parameters
         if !item.series.arguments.is_empty() {
-            let params: Vec<String> = item.series.arguments
+            let params: Vec<String> = item
+                .series
+                .arguments
                 .iter()
                 .map(|(k, v)| format!("{}={}", k, v))
                 .collect();
             name.push_str(&format!(" ({})", params.join(", ")));
         }
-        
+
         name
     }
 
     fn create_convergence_plot(&self, ui: &mut egui::Ui) {
         ui.heading("Сходимость методов");
-        
+
         if let Some(ref data) = self.data {
             if data.is_empty() {
                 ui.label("Нет данных для отображения");
@@ -103,52 +134,67 @@ impl DashboardApp {
 
                 let item_name = self.format_item_name(item);
                 let has_complex = item.computed.iter().any(|c| {
-                    c.accel_value.as_ref().map_or(false, |cn| cn.imag.abs() > 1e-15)
+                    c.accel_value
+                        .as_ref()
+                        .map_or(false, |cn| cn.imag.abs() > 1e-15)
                 });
 
                 // Main convergence line
-                let points: PlotPoints = item.computed
+                let points: PlotPoints = item
+                    .computed
                     .iter()
                     .map(|c| [c.n as f64, c.accel_value.as_ref().map_or(0.0, |cn| cn.real)])
                     .collect();
-                
+
                 lines.push(Line::new(points).name(item_name.clone()));
 
                 // Imaginary part if present and enabled
                 if has_complex && self.show_imaginary {
-                    let imag_points: PlotPoints = item.computed
+                    let imag_points: PlotPoints = item
+                        .computed
                         .iter()
                         .map(|c| [c.n as f64, c.accel_value.as_ref().map_or(0.0, |cn| cn.imag)])
                         .collect();
-                    
-                    lines.push(Line::new(imag_points)
-                        .name(format!("{} (мнимая часть)", item_name))
-                        .color(egui::Color32::from_rgb(255, 165, 0)));
+
+                    lines.push(
+                        Line::new(imag_points)
+                            .name(format!("{} (мнимая часть)", item_name))
+                            .color(egui::Color32::from_rgb(255, 165, 0)),
+                    );
                 }
 
                 // Partial sums (one per series)
                 if self.show_partial_sums && !series_names.contains(&item.series.name) {
                     series_names.insert(item.series.name.clone());
-                    
-                    let partial_points: PlotPoints = item.computed
+
+                    let partial_points: PlotPoints = item
+                        .computed
                         .iter()
                         .map(|c| [c.n as f64, c.partial_sum.as_ref().map_or(0.0, |cn| cn.real)])
                         .collect();
-                    
-                    lines.push(Line::new(partial_points)
-                        .name(format!("{} (частичные суммы)", item.series.name))
-                        .color(egui::Color32::from_rgb(128, 128, 128)));
+
+                    lines.push(
+                        Line::new(partial_points)
+                            .name(format!("{} (частичные суммы)", item.series.name))
+                            .color(egui::Color32::from_rgb(128, 128, 128)),
+                    );
 
                     // Imaginary partial sums
                     if has_complex && self.show_imaginary {
-                        let imag_partial_points: PlotPoints = item.computed
+                        let imag_partial_points: PlotPoints = item
+                            .computed
                             .iter()
                             .map(|c| [c.n as f64, c.partial_sum.as_ref().map_or(0.0, |cn| cn.imag)])
                             .collect();
-                        
-                        lines.push(Line::new(imag_partial_points)
-                            .name(format!("{} (частичные суммы, мнимая часть)", item.series.name))
-                            .color(egui::Color32::from_rgb(255, 192, 203)));
+
+                        lines.push(
+                            Line::new(imag_partial_points)
+                                .name(format!(
+                                    "{} (частичные суммы, мнимая часть)",
+                                    item.series.name
+                                ))
+                                .color(egui::Color32::from_rgb(255, 192, 203)),
+                        );
                     }
                 }
 
@@ -159,7 +205,8 @@ impl DashboardApp {
                         if !x_range.is_empty() {
                             let min_x = x_range.iter().fold(f64::INFINITY, |a, &b| a.min(b));
                             let max_x = x_range.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-                            let limit_points = PlotPoints::new(vec![[min_x, limit.real], [max_x, limit.real]]);
+                            let limit_points =
+                                PlotPoints::new(vec![[min_x, limit.real], [max_x, limit.real]]);
                             limit_lines.push((item.series.name.clone(), limit_points));
                         }
                     }
@@ -168,10 +215,12 @@ impl DashboardApp {
 
             // Add limit lines
             for (series_name, points) in limit_lines {
-                lines.push(Line::new(points)
-                    .name(format!("{} (предел)", series_name))
-                    .color(egui::Color32::from_rgb(255, 0, 0))
-                    .stroke(egui::Stroke::new(3.0, egui::Color32::from_rgb(255, 0, 0))));
+                lines.push(
+                    Line::new(points)
+                        .name(format!("{} (предел)", series_name))
+                        .color(egui::Color32::from_rgb(255, 0, 0))
+                        .stroke(egui::Stroke::new(3.0, egui::Color32::from_rgb(255, 0, 0))),
+                );
             }
 
             Plot::new("convergence")
@@ -192,7 +241,7 @@ impl DashboardApp {
 
     fn create_error_plot(&self, ui: &mut egui::Ui) {
         ui.heading("Ошибка сходимости");
-        
+
         if let Some(ref data) = self.data {
             if data.is_empty() {
                 ui.label("Нет данных для отображения");
@@ -207,18 +256,20 @@ impl DashboardApp {
                 }
 
                 let item_name = self.format_item_name(item);
-                
-                let points: PlotPoints = item.computed
+
+                let points: PlotPoints = item
+                    .computed
                     .iter()
                     .map(|c| {
-                        let error = c.accel_value_deviation
+                        let error = c
+                            .accel_value_deviation
                             .as_ref()
                             .map(|cn| cn.magnitude())
                             .unwrap_or(f64::INFINITY);
                         [c.n as f64, error.ln()] // Log scale
                     })
                     .collect();
-                
+
                 lines.push(Line::new(points).name(item_name));
             }
 
@@ -240,7 +291,7 @@ impl DashboardApp {
 
     fn create_performance_plot(&self, ui: &mut egui::Ui) {
         ui.heading("Производительность методов");
-        
+
         if let Some(ref data) = self.data {
             if data.is_empty() {
                 ui.label("Нет данных для отображения");
@@ -255,17 +306,18 @@ impl DashboardApp {
                 }
 
                 let item_name = self.format_item_name(item);
-                
+
                 // Find minimum error and corresponding iteration
                 let mut min_error = f64::INFINITY;
                 let mut min_error_iter = 0;
-                
+
                 for computed in &item.computed {
-                    let error = computed.accel_value_deviation
+                    let error = computed
+                        .accel_value_deviation
                         .as_ref()
                         .map(|cn| cn.magnitude())
                         .unwrap_or(f64::INFINITY);
-                    
+
                     if error < min_error {
                         min_error = error;
                         min_error_iter = computed.n;
@@ -286,10 +338,12 @@ impl DashboardApp {
                 .y_axis_label("Минимальная ошибка (log)")
                 .show(ui, |plot_ui| {
                     for (name, points) in point_series {
-                        plot_ui.points(Points::new(points)
-                            .name(name)
-                            .shape(MarkerShape::Circle)
-                            .radius(4.0));
+                        plot_ui.points(
+                            Points::new(points)
+                                .name(name)
+                                .shape(MarkerShape::Circle)
+                                .radius(4.0),
+                        );
                     }
                 });
         } else {
@@ -318,26 +372,31 @@ fn filter_section(
         }
     });
 
-    egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
-        ui.group(|ui| {
-            ui.style_mut().wrap = Some(true);
-            for item in items {
-                let mut checked = selected.contains(item);
-                if ui.checkbox(&mut checked, item).changed() {
-                    if checked {
-                        selected.insert(item.clone());
-                    } else {
-                        selected.remove(item);
+    egui::ScrollArea::vertical()
+        .max_height(150.0)
+        .show(ui, |ui| {
+            ui.group(|ui| {
+                ui.style_mut().wrap = Some(true);
+                for item in items {
+                    let mut checked = selected.contains(item);
+                    if ui.checkbox(&mut checked, item).changed() {
+                        if checked {
+                            selected.insert(item.clone());
+                        } else {
+                            selected.remove(item);
+                        }
                     }
                 }
-            }
+            });
         });
-    });
     ui.add_space(10.0);
 }
 
 impl eframe::App for DashboardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Проверяем наличие новых данных от фоновых потоков
+        self.check_for_data();
+        
         // Левое меню с фильтрами
         egui::SidePanel::left("filters").show(ctx, |ui| {
             ui.heading("Фильтры");
@@ -346,7 +405,7 @@ impl eframe::App for DashboardApp {
             filter_section(
                 ui,
                 "Точность",
-                &self.metadata.precisions,
+                &self.loader.metadata.precisions,
                 &mut self.filters.precisions,
                 &mut self.show_precision,
             );
@@ -355,7 +414,7 @@ impl eframe::App for DashboardApp {
             filter_section(
                 ui,
                 "Базовые ряды",
-                &self.metadata.series_names,
+                &self.loader.metadata.series_names,
                 &mut self.filters.base_series,
                 &mut self.show_series,
             );
@@ -364,7 +423,7 @@ impl eframe::App for DashboardApp {
             filter_section(
                 ui,
                 "Базовые методы ускорения",
-                &self.metadata.accel_names,
+                &self.loader.metadata.accel_names,
                 &mut self.filters.base_accel,
                 &mut self.show_accel,
             );
@@ -373,26 +432,28 @@ impl eframe::App for DashboardApp {
             ui.horizontal(|ui| {
                 ui.heading("Значения m");
                 if ui.button("All").clicked() {
-                    self.filters.m_values.extend(&self.metadata.m_values);
+                    self.filters.m_values.extend(&self.loader.metadata.m_values);
                 }
                 if ui.button("None").clicked() {
                     self.filters.m_values.clear();
                 }
             });
-            egui::ScrollArea::vertical().max_height(100.0).show(ui, |ui| {
-                ui.group(|ui| {
-                    for m in &self.metadata.m_values {
-                        let mut checked = self.filters.m_values.contains(m);
-                        if ui.checkbox(&mut checked, format!("m={}", m)).changed() {
-                            if checked {
-                                self.filters.m_values.insert(*m);
-                            } else {
-                                self.filters.m_values.remove(m);
+            egui::ScrollArea::vertical()
+                .max_height(100.0)
+                .show(ui, |ui| {
+                    ui.group(|ui| {
+                        for m in &self.loader.metadata.m_values {
+                            let mut checked = self.filters.m_values.contains(m);
+                            if ui.checkbox(&mut checked, format!("m={}", m)).changed() {
+                                if checked {
+                                    self.filters.m_values.insert(*m);
+                                } else {
+                                    self.filters.m_values.remove(m);
+                                }
                             }
                         }
-                    }
+                    });
                 });
-            });
 
             ui.separator();
 
@@ -401,7 +462,7 @@ impl eframe::App for DashboardApp {
             ui.checkbox(&mut self.show_convergence, "График сходимости");
             ui.checkbox(&mut self.show_error, "График ошибки");
             ui.checkbox(&mut self.show_performance, "График производительности");
-            
+
             ui.separator();
             ui.checkbox(&mut self.show_partial_sums, "Частичные суммы");
             ui.checkbox(&mut self.show_limits, "Пределы");
