@@ -23,7 +23,7 @@ pub struct DashboardApp {
 }
 
 impl DashboardApp {
-    pub fn new(mut loader: DataLoader, metadata: Metadata) -> Self {
+    pub fn new(loader: DataLoader, metadata: Metadata) -> Self {
         Self {
             loader,
             filters: Filters::default(),
@@ -44,8 +44,9 @@ impl DashboardApp {
     fn update_data(&mut self) {
         match self.loader.filter_data(&self.filters) {
             Ok(data) => {
+                let len = data.len();
                 self.data = Some(data);
-                println!("Loaded {} items after filtering", data.len());
+                println!("Loaded {} items after filtering", len);
             }
             Err(e) => {
                 eprintln!("Error filtering data: {}", e);
@@ -61,7 +62,7 @@ impl DashboardApp {
         if !item.accel.additional_args.is_empty() {
             let params: Vec<String> = item.accel.additional_args
                 .iter()
-                .map(|(k, v)| format!("{}={}", k, self.format_value(v)))
+                .map(|(k, v)| format!("{}={}", k, v))
                 .collect();
             name.push_str(&format!("({}) ", params.join(", ")));
         }
@@ -72,28 +73,12 @@ impl DashboardApp {
         if !item.series.arguments.is_empty() {
             let params: Vec<String> = item.series.arguments
                 .iter()
-                .map(|(k, v)| format!("{}={}", k, self.format_value(v)))
+                .map(|(k, v)| format!("{}={}", k, v))
                 .collect();
             name.push_str(&format!(" ({})", params.join(", ")));
         }
         
         name
-    }
-
-    fn format_value(&self, value: &serde_json::Value) -> String {
-        match value {
-            serde_json::Value::Number(n) => {
-                if let Some(f) = n.as_f64() {
-                    format!("{:.6}", f)
-                } else if let Some(i) = n.as_i64() {
-                    i.to_string()
-                } else {
-                    n.to_string()
-                }
-            }
-            serde_json::Value::String(s) => s.clone(),
-            _ => value.to_string(),
-        }
     }
 
     fn create_convergence_plot(&self, ui: &mut egui::Ui) {
@@ -169,7 +154,9 @@ impl DashboardApp {
                 if self.show_limits && !series_names.contains(&item.series.name) {
                     if let Some(limit) = &item.series.lim {
                         let x_range: Vec<f64> = item.computed.iter().map(|c| c.n as f64).collect();
-                        if let (Some(min_x), Some(max_x)) = (x_range.iter().fold(f64::INFINITY, |a, &b| a.min(b)), x_range.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b))) {
+                        if !x_range.is_empty() {
+                            let min_x = x_range.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+                            let max_x = x_range.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
                             let limit_points = PlotPoints::new(vec![[min_x, limit.real], [max_x, limit.real]]);
                             limit_lines.push((item.series.name.clone(), limit_points));
                         }
