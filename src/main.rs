@@ -18,7 +18,7 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     println!("Loading parquet data from: {}", args.data_dir.display());
-    let loader = data_loader::DataLoader::new(&args.data_dir)?;
+    let mut loader = data_loader::DataLoader::new(&args.data_dir)?;
     let metadata = loader.get_metadata()?;
     println!(
         "Found {} precisions, {} series, {} accelerators",

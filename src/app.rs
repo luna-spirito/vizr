@@ -1,21 +1,29 @@
 use eframe::egui;
-use egui_plot::{Line, Plot, PlotPoints};
-use crate::data_loader::{DataLoader, Metadata};
+use egui_plot::{Line, Plot, PlotPoints, Points, MarkerShape};
+use crate::data_loader::{DataLoader, Metadata, DataItem};
 use crate::filters::Filters;
 
 pub struct DashboardApp {
     loader: DataLoader,
     filters: Filters,
-    data: Option<polars::prelude::DataFrame>,
+    data: Option<Vec<DataItem>>,
     metadata: Metadata,
     // UI состояние
     show_precision: bool,
     show_series: bool,
     show_accel: bool,
+    // Plot visibility toggles
+    show_convergence: bool,
+    show_error: bool,
+    show_performance: bool,
+    // Plot options
+    show_partial_sums: bool,
+    show_limits: bool,
+    show_imaginary: bool,
 }
 
 impl DashboardApp {
-    pub fn new(loader: DataLoader, metadata: Metadata) -> Self {
+    pub fn new(mut loader: DataLoader, metadata: Metadata) -> Self {
         Self {
             loader,
             filters: Filters::default(),
@@ -24,12 +32,279 @@ impl DashboardApp {
             show_precision: true,
             show_series: true,
             show_accel: true,
+            show_convergence: true,
+            show_error: true,
+            show_performance: true,
+            show_partial_sums: true,
+            show_limits: true,
+            show_imaginary: true,
         }
     }
 
     fn update_data(&mut self) {
-        if let Ok(df) = self.loader.filter_data(&self.filters) {
-            self.data = Some(df);
+        match self.loader.filter_data(&self.filters) {
+            Ok(data) => {
+                self.data = Some(data);
+                println!("Loaded {} items after filtering", data.len());
+            }
+            Err(e) => {
+                eprintln!("Error filtering data: {}", e);
+                self.data = None;
+            }
+        }
+    }
+
+    fn format_item_name(&self, item: &DataItem) -> String {
+        let mut name = format!("{} (m={}) ", item.accel.name, item.accel.m_value);
+        
+        // Add accel parameters
+        if !item.accel.additional_args.is_empty() {
+            let params: Vec<String> = item.accel.additional_args
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, self.format_value(v)))
+                .collect();
+            name.push_str(&format!("({}) ", params.join(", ")));
+        }
+        
+        name.push_str(&item.series.name);
+        
+        // Add series parameters
+        if !item.series.arguments.is_empty() {
+            let params: Vec<String> = item.series.arguments
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, self.format_value(v)))
+                .collect();
+            name.push_str(&format!(" ({})", params.join(", ")));
+        }
+        
+        name
+    }
+
+    fn format_value(&self, value: &serde_json::Value) -> String {
+        match value {
+            serde_json::Value::Number(n) => {
+                if let Some(f) = n.as_f64() {
+                    format!("{:.6}", f)
+                } else if let Some(i) = n.as_i64() {
+                    i.to_string()
+                } else {
+                    n.to_string()
+                }
+            }
+            serde_json::Value::String(s) => s.clone(),
+            _ => value.to_string(),
+        }
+    }
+
+    fn create_convergence_plot(&self, ui: &mut egui::Ui) {
+        ui.heading("Сходимость методов");
+        
+        if let Some(ref data) = self.data {
+            if data.is_empty() {
+                ui.label("Нет данных для отображения");
+                return;
+            }
+
+            let mut lines = Vec::new();
+            let mut series_names = std::collections::HashSet::new();
+            let mut limit_lines = Vec::new();
+
+            for item in data {
+                if item.computed.is_empty() {
+                    continue;
+                }
+
+                let item_name = self.format_item_name(item);
+                let has_complex = item.computed.iter().any(|c| {
+                    c.accel_value.as_ref().map_or(false, |cn| cn.imag.abs() > 1e-15)
+                });
+
+                // Main convergence line
+                let points: PlotPoints = item.computed
+                    .iter()
+                    .map(|c| [c.n as f64, c.accel_value.as_ref().map_or(0.0, |cn| cn.real)])
+                    .collect();
+                
+                lines.push(Line::new(points).name(item_name.clone()));
+
+                // Imaginary part if present and enabled
+                if has_complex && self.show_imaginary {
+                    let imag_points: PlotPoints = item.computed
+                        .iter()
+                        .map(|c| [c.n as f64, c.accel_value.as_ref().map_or(0.0, |cn| cn.imag)])
+                        .collect();
+                    
+                    lines.push(Line::new(imag_points)
+                        .name(format!("{} (мнимая часть)", item_name))
+                        .color(egui::Color32::from_rgb(255, 165, 0)));
+                }
+
+                // Partial sums (one per series)
+                if self.show_partial_sums && !series_names.contains(&item.series.name) {
+                    series_names.insert(item.series.name.clone());
+                    
+                    let partial_points: PlotPoints = item.computed
+                        .iter()
+                        .map(|c| [c.n as f64, c.partial_sum.as_ref().map_or(0.0, |cn| cn.real)])
+                        .collect();
+                    
+                    lines.push(Line::new(partial_points)
+                        .name(format!("{} (частичные суммы)", item.series.name))
+                        .color(egui::Color32::from_rgb(128, 128, 128)));
+
+                    // Imaginary partial sums
+                    if has_complex && self.show_imaginary {
+                        let imag_partial_points: PlotPoints = item.computed
+                            .iter()
+                            .map(|c| [c.n as f64, c.partial_sum.as_ref().map_or(0.0, |cn| cn.imag)])
+                            .collect();
+                        
+                        lines.push(Line::new(imag_partial_points)
+                            .name(format!("{} (частичные суммы, мнимая часть)", item.series.name))
+                            .color(egui::Color32::from_rgb(255, 192, 203)));
+                    }
+                }
+
+                // Limit line (one per series)
+                if self.show_limits && !series_names.contains(&item.series.name) {
+                    if let Some(limit) = &item.series.lim {
+                        let x_range: Vec<f64> = item.computed.iter().map(|c| c.n as f64).collect();
+                        if let (Some(min_x), Some(max_x)) = (x_range.iter().fold(f64::INFINITY, |a, &b| a.min(b)), x_range.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b))) {
+                            let limit_points = PlotPoints::new(vec![[min_x, limit.real], [max_x, limit.real]]);
+                            limit_lines.push((item.series.name.clone(), limit_points));
+                        }
+                    }
+                }
+            }
+
+            // Add limit lines
+            for (series_name, points) in limit_lines {
+                lines.push(Line::new(points)
+                    .name(format!("{} (предел)", series_name))
+                    .color(egui::Color32::from_rgb(255, 0, 0))
+                    .stroke(egui::Stroke::new(3.0, egui::Color32::from_rgb(255, 0, 0))));
+            }
+
+            Plot::new("convergence")
+                .allow_zoom(true)
+                .allow_drag(true)
+                .height(600.0)
+                .x_axis_label("Итерация n")
+                .y_axis_label("Значение")
+                .show(ui, |plot_ui| {
+                    for line in lines {
+                        plot_ui.line(line);
+                    }
+                });
+        } else {
+            ui.label("Нет данных для отображения");
+        }
+    }
+
+    fn create_error_plot(&self, ui: &mut egui::Ui) {
+        ui.heading("Ошибка сходимости");
+        
+        if let Some(ref data) = self.data {
+            if data.is_empty() {
+                ui.label("Нет данных для отображения");
+                return;
+            }
+
+            let mut lines = Vec::new();
+
+            for item in data {
+                if item.computed.is_empty() {
+                    continue;
+                }
+
+                let item_name = self.format_item_name(item);
+                
+                let points: PlotPoints = item.computed
+                    .iter()
+                    .map(|c| {
+                        let error = c.accel_value_deviation
+                            .as_ref()
+                            .map(|cn| cn.magnitude())
+                            .unwrap_or(f64::INFINITY);
+                        [c.n as f64, error.ln()] // Log scale
+                    })
+                    .collect();
+                
+                lines.push(Line::new(points).name(item_name));
+            }
+
+            Plot::new("error")
+                .allow_zoom(true)
+                .allow_drag(true)
+                .height(400.0)
+                .x_axis_label("Итерация n")
+                .y_axis_label("Абсолютная ошибка (log)")
+                .show(ui, |plot_ui| {
+                    for line in lines {
+                        plot_ui.line(line);
+                    }
+                });
+        } else {
+            ui.label("Нет данных для отображения");
+        }
+    }
+
+    fn create_performance_plot(&self, ui: &mut egui::Ui) {
+        ui.heading("Производительность методов");
+        
+        if let Some(ref data) = self.data {
+            if data.is_empty() {
+                ui.label("Нет данных для отображения");
+                return;
+            }
+
+            let mut point_series = Vec::new();
+
+            for item in data {
+                if item.computed.is_empty() {
+                    continue;
+                }
+
+                let item_name = self.format_item_name(item);
+                
+                // Find minimum error and corresponding iteration
+                let mut min_error = f64::INFINITY;
+                let mut min_error_iter = 0;
+                
+                for computed in &item.computed {
+                    let error = computed.accel_value_deviation
+                        .as_ref()
+                        .map(|cn| cn.magnitude())
+                        .unwrap_or(f64::INFINITY);
+                    
+                    if error < min_error {
+                        min_error = error;
+                        min_error_iter = computed.n;
+                    }
+                }
+
+                if min_error < f64::INFINITY {
+                    let point = PlotPoints::new(vec![[min_error_iter as f64, min_error.ln()]]);
+                    point_series.push((item_name, point));
+                }
+            }
+
+            Plot::new("performance")
+                .allow_zoom(true)
+                .allow_drag(true)
+                .height(400.0)
+                .x_axis_label("Итерация достижения минимальной ошибки")
+                .y_axis_label("Минимальная ошибка (log)")
+                .show(ui, |plot_ui| {
+                    for (name, points) in point_series {
+                        plot_ui.points(Points::new(points)
+                            .name(name)
+                            .shape(MarkerShape::Circle)
+                            .radius(4.0));
+                    }
+                });
+        } else {
+            ui.label("Нет данных для отображения");
         }
     }
 }
@@ -54,25 +329,27 @@ fn filter_section(
         }
     });
 
-    ui.group(|ui| {
-        ui.style_mut().wrap = Some(true);
-        for item in items {
-            let mut checked = selected.contains(item);
-            if ui.checkbox(&mut checked, item).changed() {
-                if checked {
-                    selected.insert(item.clone());
-                } else {
-                    selected.remove(item);
+    egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
+        ui.group(|ui| {
+            ui.style_mut().wrap = Some(true);
+            for item in items {
+                let mut checked = selected.contains(item);
+                if ui.checkbox(&mut checked, item).changed() {
+                    if checked {
+                        selected.insert(item.clone());
+                    } else {
+                        selected.remove(item);
+                    }
                 }
             }
-        }
+        });
     });
     ui.add_space(10.0);
 }
 
 impl eframe::App for DashboardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Левое меню с фильтрами (как в вашем HTML)
+        // Левое меню с фильтрами
         egui::SidePanel::left("filters").show(ctx, |ui| {
             ui.heading("Фильтры");
 
@@ -113,75 +390,74 @@ impl eframe::App for DashboardApp {
                     self.filters.m_values.clear();
                 }
             });
-            ui.group(|ui| {
-                for m in &self.metadata.m_values {
-                    let mut checked = self.filters.m_values.contains(m);
-                    if ui.checkbox(&mut checked, format!("m={}", m)).changed() {
-                        if checked {
-                            self.filters.m_values.insert(*m);
-                        } else {
-                            self.filters.m_values.remove(m);
+            egui::ScrollArea::vertical().max_height(100.0).show(ui, |ui| {
+                ui.group(|ui| {
+                    for m in &self.metadata.m_values {
+                        let mut checked = self.filters.m_values.contains(m);
+                        if ui.checkbox(&mut checked, format!("m={}", m)).changed() {
+                            if checked {
+                                self.filters.m_values.insert(*m);
+                            } else {
+                                self.filters.m_values.remove(m);
+                            }
                         }
                     }
-                }
+                });
             });
+
+            ui.separator();
+
+            // Plot options
+            ui.heading("Опции графиков");
+            ui.checkbox(&mut self.show_convergence, "График сходимости");
+            ui.checkbox(&mut self.show_error, "График ошибки");
+            ui.checkbox(&mut self.show_performance, "График производительности");
+            
+            ui.separator();
+            ui.checkbox(&mut self.show_partial_sums, "Частичные суммы");
+            ui.checkbox(&mut self.show_limits, "Пределы");
+            ui.checkbox(&mut self.show_imaginary, "Мнимые части");
+
+            ui.separator();
 
             // Кнопка Обновить
             if ui.button("🔄 Обновить графики").clicked() {
                 self.update_data();
             }
+
+            // Show data count
+            if let Some(ref data) = self.data {
+                ui.label(format!("Загружено записей: {}", data.len()));
+            }
         });
 
         // Центральная область с графиками
         egui::CentralPanel::default().show(ctx, |ui| {
-            if let Some(ref df) = self.data {
-                ui.heading("Сходимость методов");
-                
-                // Создаём PlotPoints из данных
-                if let Ok(_computed_col) = df.column("computed") {
-                    if let Ok(_accel_col) = df.column("accel") {
-                        let plot_points: PlotPoints = (0..df.height())
-                            .map(|i| {
-                                // Упрощенный пример - нужно адаптировать под реальные данные
-                                let n = i as f64;
-                                let value = 1.0; // Заглушка, нужно получить реальные данные
-                                [n, value]
-                            })
-                            .collect();
-
-                        Plot::new("convergence")
-                            .allow_zoom(true)
-                            .allow_drag(true)
-                            .height(300.0)
-                            .show(ui, |plot_ui| {
-                                plot_ui.line(Line::new(plot_points));
-                            });
-
-                        // Второй график ошибки
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                if self.data.is_some() {
+                    // Convergence plot
+                    if self.show_convergence {
+                        self.create_convergence_plot(ui);
                         ui.separator();
-                        ui.heading("Ошибка сходимости");
-                        
-                        let error_points: PlotPoints = (0..df.height())
-                            .map(|i| {
-                                let n = i as f64;
-                                let error = (i as f64).ln(); // Заглушка
-                                [n, error]
-                            })
-                            .collect();
-
-                        Plot::new("error")
-                            .allow_zoom(true)
-                            .height(300.0)
-                            .show(ui, |plot_ui| {
-                                plot_ui.line(Line::new(error_points).color(egui::Color32::RED));
-                            });
                     }
+
+                    // Error plot
+                    if self.show_error {
+                        self.create_error_plot(ui);
+                        ui.separator();
+                    }
+
+                    // Performance plot
+                    if self.show_performance {
+                        self.create_performance_plot(ui);
+                        ui.separator();
+                    }
+                } else {
+                    ui.centered_and_justified(|ui| {
+                        ui.heading("Выберите фильтры и нажмите Обновить");
+                    });
                 }
-            } else {
-                ui.centered_and_justified(|ui| {
-                    ui.heading("Выберите фильтры и нажмите Обновить");
-                });
-            }
+            });
         });
     }
 }
