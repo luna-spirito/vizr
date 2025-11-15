@@ -42,7 +42,9 @@ impl DashboardApp {
     }
 
     fn update_data(&mut self) {
-        match self.loader.filter_data(&self.filters) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(self.loader.filter_data(&self.filters));
+        match result {
             Ok(data) => {
                 let len = data.len();
                 self.data = Some(data);

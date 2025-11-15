@@ -10,15 +10,16 @@ use std::path::PathBuf;
 #[command(about = "A high-performance parquet data visualizer")]
 struct Args {
     /// Path to the directory containing parquet files
-    data_dir: PathBuf,
+    data_dir: String,
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     env_logger::init();
     let args = Args::parse();
 
-    println!("Loading parquet data from: {}", args.data_dir.display());
-    let loader = data_loader::DataLoader::new(args.data_dir)?;
+    println!("Loading parquet data from: {}", args.data_dir);
+    let loader = data_loader::DataLoader::new(&args.data_dir).await?;
     let metadata = loader.metadata.clone();
     println!(
         "Found {} precisions, {} series, {} accelerators",

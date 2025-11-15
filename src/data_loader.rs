@@ -1,12 +1,12 @@
 use crate::filters::Filters;
 use anyhow::Result;
-use arrow::array::*;
-use arrow::record_batch::RecordBatch;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use datafusion::arrow::array::*;
+use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::logical_expr::{col, lit};
+use datafusion::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use std::fs::File;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 // Core
@@ -21,8 +21,6 @@ impl ComplexNumber {
         (self.real * self.real + self.imag * self.imag).sqrt()
     }
 }
-
-// Entries
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComputedValue {
@@ -69,99 +67,121 @@ pub struct Metadata {
 }
 
 pub struct DataLoader {
-    file_path: PathBuf,
+    ctx: SessionContext,
     pub metadata: Metadata,
 }
 
 impl DataLoader {
-    pub fn new(path: PathBuf) -> Result<Self> {
-        let metadata = Self::compute_metadata(&path)?;
-        Ok(Self {
-            file_path: path,
-            metadata,
+    pub async fn new(path: &str) -> Result<Self> {
+        let ctx = SessionContext::new();
+
+        // Register Hive-partitioned parquet dataset as a table
+        let mut options = ParquetReadOptions::default();
+        options = options.table_partition_cols(vec![
+            (
+                "precision".to_string(),
+                datafusion::arrow::datatypes::DataType::Utf8,
+            ),
+            (
+                "series_name".to_string(),
+                datafusion::arrow::datatypes::DataType::Utf8,
+            ),
+            (
+                "accel_name".to_string(),
+                datafusion::arrow::datatypes::DataType::Utf8,
+            ),
+        ]);
+
+        ctx.register_parquet("data", path, options)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to register parquet: {}", e))?;
+
+        let metadata = Self::compute_metadata(&ctx).await?;
+        Ok(Self { ctx, metadata })
+    }
+
+    async fn compute_metadata(ctx: &SessionContext) -> Result<Metadata> {
+        // Get unique values using simple SELECT DISTINCT queries
+        let precisions = Self::get_unique_strings(ctx, "precision").await?;
+        let series_names = Self::get_unique_strings(ctx, "series_name").await?;
+        let accel_names = Self::get_unique_strings(ctx, "accel_name").await?;
+
+        Ok(Metadata {
+            precisions,
+            series_names,
+            accel_names,
+            m_values: vec![],                  // TODO: extract from accel struct
+            accel_param_info: HashMap::new(),  // TODO: extract from struct
+            series_param_info: HashMap::new(), // TODO: extract from struct
         })
     }
 
-    fn compute_metadata(file_path: &PathBuf) -> Result<Metadata> {
-        let file = File::open(file_path)?;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-        let mut reader = builder.build()?;
+    async fn get_unique_strings(ctx: &SessionContext, column: &str) -> Result<Vec<String>> {
+        let df = ctx.table("data").await?;
+        let df = df.select(vec![col(column)])?.distinct()?;
+        let batches: Vec<RecordBatch> = df
+            .collect()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get unique {}: {}", column, e))?;
 
-        let mut precisions = HashSet::new();
-        let mut series_names = HashSet::new();
-        let mut accel_names = HashSet::new();
-        let m_values = HashSet::new();
-        let accel_param_info: HashMap<String, Vec<String>> = HashMap::new();
-        let series_param_info: HashMap<String, Vec<String>> = HashMap::new();
-
-        let mut processed_rows = 0;
-        const MAX_SAMPLE_ROWS: usize = 10000;
-
-        while let Some(batch) = reader.next() {
-            let batch = batch?;
-            if processed_rows >= MAX_SAMPLE_ROWS {
-                break;
-            }
-
-            // Get precision column
-            if let Some(precision_array) = batch.column_by_name("precision") {
-                if let Some(string_array) = precision_array.as_any().downcast_ref::<StringArray>() {
-                    for val in string_array.iter().take(MAX_SAMPLE_ROWS - processed_rows) {
-                        if let Some(val) = val {
-                            precisions.insert(val.to_string());
-                        }
-                    }
-                }
-            }
-
-            // Get series_name column
-            if let Some(series_array) = batch.column_by_name("series_name") {
-                if let Some(string_array) = series_array.as_any().downcast_ref::<StringArray>() {
-                    for val in string_array.iter().take(MAX_SAMPLE_ROWS - processed_rows) {
-                        if let Some(val) = val {
-                            series_names.insert(val.to_string());
-                            processed_rows += 1;
-                        }
-                    }
-                }
-            }
-
-            // Get accel_name column
-            if let Some(accel_array) = batch.column_by_name("accel_name") {
-                if let Some(string_array) = accel_array.as_any().downcast_ref::<StringArray>() {
+        let mut values = Vec::new();
+        for batch in batches {
+            if let Some(array) = batch.column_by_name(column) {
+                if let Some(string_array) = array.as_any().downcast_ref::<StringArray>() {
                     for val in string_array.iter() {
                         if let Some(val) = val {
-                            accel_names.insert(val.to_string());
+                            values.push(val.to_string());
                         }
                     }
                 }
             }
         }
-
-        Ok(Metadata {
-            precisions: precisions.into_iter().collect(),
-            series_names: series_names.into_iter().collect(),
-            accel_names: accel_names.into_iter().collect(),
-            m_values: m_values.into_iter().collect(),
-            accel_param_info,
-            series_param_info,
-        })
+        Ok(values)
     }
 
-    pub fn filter_data(&self, filters: &Filters) -> Result<Vec<DataItem>> {
-        let file = File::open(&self.file_path)?;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-        let mut reader = builder.build()?;
+    pub async fn filter_data(&self, filters: &Filters) -> Result<Vec<DataItem>> {
+        let mut df = self.ctx.table("data").await?;
 
+        // Apply filters using DataFusion's predicate pushdown
+        if !filters.precisions.is_empty() {
+            let mut filter_expr =
+                col("precision").eq(lit(filters.precisions.iter().next().unwrap().clone()));
+            for p in filters.precisions.iter().skip(1) {
+                filter_expr = filter_expr.or(col("precision").eq(lit(p.clone())));
+            }
+            df = df.filter(filter_expr)?;
+        }
+
+        if !filters.base_series.is_empty() {
+            let mut filter_expr =
+                col("series_name").eq(lit(filters.base_series.iter().next().unwrap().clone()));
+            for s in filters.base_series.iter().skip(1) {
+                filter_expr = filter_expr.or(col("series_name").eq(lit(s.clone())));
+            }
+            df = df.filter(filter_expr)?;
+        }
+
+        if !filters.base_accel.is_empty() {
+            let mut filter_expr =
+                col("accel_name").eq(lit(filters.base_accel.iter().next().unwrap().clone()));
+            for a in filters.base_accel.iter().skip(1) {
+                filter_expr = filter_expr.or(col("accel_name").eq(lit(a.clone())));
+            }
+            df = df.filter(filter_expr)?;
+        }
+
+        // Execute query with filters
+        let batches: Vec<RecordBatch> = df
+            .collect()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to execute query: {}", e))?;
+
+        // Convert to DataItems
         let mut items = Vec::new();
-
-        while let Some(batch) = reader.next() {
-            let batch = batch?;
+        for batch in batches {
             for row_idx in 0..batch.num_rows() {
                 if let Ok(item) = self.row_to_data_item(&batch, row_idx) {
-                    if self.matches_filters(&item, filters) {
-                        items.push(item);
-                    }
+                    items.push(item);
                 }
             }
         }
@@ -173,7 +193,7 @@ impl DataLoader {
     }
 
     fn row_to_data_item(&self, batch: &RecordBatch, row_idx: usize) -> Result<DataItem> {
-        // Get partition columns
+        // Get partition columns (Hive partitions become regular columns)
         let precision_col = batch.column_by_name("precision").unwrap();
         let precision_array = precision_col
             .as_any()
@@ -195,11 +215,11 @@ impl DataLoader {
             .unwrap();
         let accel_name = accel_name_array.value(row_idx).to_string();
 
-        // Parse series info
+        // Parse series info from struct
         let series_col = batch.column_by_name("series").unwrap();
-        let series_array = series_col.as_any().downcast_ref::<StringArray>().unwrap();
-        let series_str = series_array.value(row_idx);
-        let series_data: serde_json::Value = serde_json::from_str(series_str)
+        let series_struct_array = series_col.as_any().downcast_ref::<StructArray>().unwrap();
+        let series_data = self.extract_struct_as_json(&series_struct_array, row_idx)?;
+        let series_data: serde_json::Value = serde_json::from_str(&series_data)
             .map_err(|e| anyhow::anyhow!("Failed to parse series JSON: {}", e))?;
 
         let series = SeriesInfo {
@@ -219,11 +239,11 @@ impl DataLoader {
                 .and_then(|s| self.parse_complex_number(s).ok()),
         };
 
-        // Parse accel info
+        // Parse accel info from struct
         let accel_col = batch.column_by_name("accel").unwrap();
-        let accel_array = accel_col.as_any().downcast_ref::<StringArray>().unwrap();
-        let accel_str = accel_array.value(row_idx);
-        let accel_data: serde_json::Value = serde_json::from_str(accel_str)
+        let accel_struct_array = accel_col.as_any().downcast_ref::<StructArray>().unwrap();
+        let accel_data = self.extract_struct_as_json(&accel_struct_array, row_idx)?;
+        let accel_data: serde_json::Value = serde_json::from_str(&accel_data)
             .map_err(|e| anyhow::anyhow!("Failed to parse accel JSON: {}", e))?;
 
         let accel = AccelInfo {
@@ -243,37 +263,22 @@ impl DataLoader {
                 .unwrap_or_default(),
         };
 
-        // Parse computed values
+        // Parse computed values from list struct
         let computed = if let Some(computed_col) = batch.column_by_name("computed") {
-            let computed_array = computed_col.as_any().downcast_ref::<StringArray>().unwrap();
-            let computed_str = computed_array.value(row_idx);
-
-            // Try to parse as JSON array
-            if let Ok(computed_data) = serde_json::from_str::<serde_json::Value>(computed_str) {
-                if let Some(arr) = computed_data.as_array() {
-                    arr.iter()
-                        .filter_map(|item| self.parse_computed_value(item))
-                        .collect()
-                } else {
-                    Vec::new()
-                }
-            } else {
-                Vec::new()
-            }
+            let computed_list_array = computed_col.as_any().downcast_ref::<ListArray>().unwrap();
+            self.extract_computed_values(&computed_list_array, row_idx)?
         } else {
             Vec::new()
         };
 
-        // Get optional stack_id and error
+        // Get optional stack_id (string) and error (struct)
         let stack_id = batch
             .column_by_name("stack_id")
-            .and_then(|col| col.as_any().downcast_ref::<Int32Array>())
-            .and_then(|arr| arr.value(row_idx).try_into().ok());
+            .and_then(|col| col.as_any().downcast_ref::<StringArray>())
+            .and_then(|arr| arr.value(row_idx).parse::<i32>().ok());
 
-        let error = batch
-            .column_by_name("error")
-            .and_then(|col| col.as_any().downcast_ref::<Float64Array>())
-            .and_then(|arr| arr.value(row_idx).try_into().ok());
+        // Note: error is now a struct, not a float, so we'll ignore it for now
+        let error = None;
 
         Ok(DataItem {
             precision,
@@ -343,60 +348,6 @@ impl DataLoader {
         Err(anyhow::anyhow!("Could not parse complex number: {}", value))
     }
 
-    fn matches_filters(&self, item: &DataItem, filters: &Filters) -> bool {
-        // Check precision filter
-        if !filters.precisions.is_empty() && !filters.precisions.contains(&item.precision) {
-            return false;
-        }
-
-        // Check base series filter
-        if !filters.base_series.is_empty() && !filters.base_series.contains(&item.series.name) {
-            return false;
-        }
-
-        // Check base accel filter
-        if !filters.base_accel.is_empty() && !filters.base_accel.contains(&item.accel.name) {
-            return false;
-        }
-
-        // Check m_values filter
-        if !filters.m_values.is_empty() && !filters.m_values.contains(&item.accel.m_value) {
-            return false;
-        }
-
-        // Check accel params
-        for (param_name, expected_values) in &filters.accel_params {
-            if !expected_values.is_empty() {
-                let actual_value: &str = item
-                    .accel
-                    .additional_args
-                    .get(param_name)
-                    .map(|s| s.as_str())
-                    .unwrap_or("");
-                if !expected_values.contains(actual_value) {
-                    return false;
-                }
-            }
-        }
-
-        // Check series params
-        for (param_name, expected_values) in &filters.series_params {
-            if !expected_values.is_empty() {
-                let actual_value: &str = item
-                    .series
-                    .arguments
-                    .get(param_name)
-                    .map(|s| s.as_str())
-                    .unwrap_or("");
-                if !expected_values.contains(actual_value) {
-                    return false;
-                }
-            }
-        }
-
-        true
-    }
-
     fn group_and_select_best(&self, items: Vec<DataItem>) -> Vec<DataItem> {
         let mut groups: HashMap<String, Vec<DataItem>> = HashMap::new();
 
@@ -441,5 +392,113 @@ impl DataLoader {
         } else {
             f64::INFINITY
         }
+    }
+
+    fn extract_struct_as_json(&self, struct_array: &StructArray, row_idx: usize) -> Result<String> {
+        let mut obj = serde_json::Map::new();
+
+        for (field_idx, field_name) in struct_array.column_names().iter().enumerate() {
+            let field_array = struct_array.column(field_idx);
+
+            if let Some(string_array) = field_array.as_any().downcast_ref::<StringArray>() {
+                let value = string_array.value(row_idx);
+                obj.insert(
+                    field_name.to_string(),
+                    serde_json::Value::String(value.to_string()),
+                );
+            } else if let Some(int_array) = field_array.as_any().downcast_ref::<Int64Array>() {
+                let value = int_array.value(row_idx);
+                obj.insert(
+                    field_name.to_string(),
+                    serde_json::Value::Number(serde_json::Number::from(value)),
+                );
+            }
+        }
+
+        Ok(serde_json::Value::Object(obj).to_string())
+    }
+
+    fn extract_computed_values(
+        &self,
+        list_array: &ListArray,
+        row_idx: usize,
+    ) -> Result<Vec<ComputedValue>> {
+        let mut computed_values = Vec::new();
+
+        let value = list_array.value(row_idx);
+        if let Some(struct_array) = value.as_any().downcast_ref::<StructArray>() {
+            for i in 0..struct_array.len() {
+                if let Ok(computed_value) = self.extract_single_computed_value(struct_array, i) {
+                    computed_values.push(computed_value);
+                }
+            }
+        }
+
+        Ok(computed_values)
+    }
+
+    fn extract_single_computed_value(
+        &self,
+        struct_array: &StructArray,
+        row_idx: usize,
+    ) -> Result<ComputedValue> {
+        let mut n = 0;
+        let mut accel_value = None;
+        let mut partial_sum = None;
+        let mut accel_value_deviation = None;
+        let mut partial_sum_deviation = None;
+        let mut series_value = None;
+
+        for (field_idx, field_name) in struct_array.column_names().iter().enumerate() {
+            let field_array = struct_array.column(field_idx);
+
+            match *field_name {
+                "n" => {
+                    if let Some(int_array) = field_array.as_any().downcast_ref::<Int64Array>() {
+                        n = int_array.value(row_idx) as i32;
+                    }
+                }
+                "accel_value" => {
+                    if let Some(string_array) = field_array.as_any().downcast_ref::<StringArray>() {
+                        let value = string_array.value(row_idx);
+                        accel_value = self.parse_complex_number(value).ok();
+                    }
+                }
+                "partial_sum" => {
+                    if let Some(string_array) = field_array.as_any().downcast_ref::<StringArray>() {
+                        let value = string_array.value(row_idx);
+                        partial_sum = self.parse_complex_number(value).ok();
+                    }
+                }
+                "accel_value_deviation" => {
+                    if let Some(string_array) = field_array.as_any().downcast_ref::<StringArray>() {
+                        let value = string_array.value(row_idx);
+                        accel_value_deviation = self.parse_complex_number(value).ok();
+                    }
+                }
+                "partial_sum_deviation" => {
+                    if let Some(string_array) = field_array.as_any().downcast_ref::<StringArray>() {
+                        let value = string_array.value(row_idx);
+                        partial_sum_deviation = self.parse_complex_number(value).ok();
+                    }
+                }
+                "series_value" => {
+                    if let Some(string_array) = field_array.as_any().downcast_ref::<StringArray>() {
+                        let value = string_array.value(row_idx);
+                        series_value = self.parse_complex_number(value).ok();
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(ComputedValue {
+            n,
+            accel_value,
+            partial_sum,
+            accel_value_deviation,
+            partial_sum_deviation,
+            series_value,
+        })
     }
 }
