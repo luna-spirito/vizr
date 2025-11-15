@@ -3,7 +3,7 @@ mod data_loader;
 mod filters;
 
 use clap::Parser;
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(name = "vizr")]

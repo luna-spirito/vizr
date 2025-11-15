@@ -1,8 +1,9 @@
-use crate::data_loader::{DataItem, DataLoader, Metadata};
+use crate::data_loader::{DataItem, DataLoader};
 use crate::filters::Filters;
 use eframe::egui;
 use egui_plot::{Line, MarkerShape, Plot, PlotPoints, Points};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, mpsc};
+use anyhow::Result;
 
 pub struct DashboardApp {
     loader: Arc<DataLoader>,
@@ -21,14 +22,14 @@ pub struct DashboardApp {
     show_limits: bool,
     show_imaginary: bool,
     // Каналы для асинхронной загрузки данных
-    data_sender: Option<std::sync::mpsc::Sender<Result<Vec<DataItem>, anyhow::Error>>>,
-    data_receiver: Option<std::sync::mpsc::Receiver<Result<Vec<DataItem>, anyhow::Error>>>,
+    data_sender: Option<mpsc::Sender<Result<Vec<DataItem>>>>,
+    data_receiver: Option<mpsc::Receiver<Result<Vec<DataItem>>>>,
     loading: bool,
 }
 
 impl DashboardApp {
     pub fn new(loader: Arc<DataLoader>) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel::<std::result::Result<Vec<DataItem>, anyhow::Error>>();
         Self {
             loader,
             filters: Filters::default(),
@@ -57,7 +58,7 @@ impl DashboardApp {
             // Запускаем загрузку в отдельном потоке
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
-                let result = rt.block_on(loader.filter_data(&filters));
+                let result: std::result::Result<Vec<DataItem>, anyhow::Error> = rt.block_on(loader.filter_data(&filters));
                 let _ = tx.send(result);
             });
             
@@ -84,13 +85,12 @@ impl DashboardApp {
         }
     }
 
-    fn format_item_name(&self, item: &DataItem) -> String {
-        let mut name = format!("{} (m={}) ", item.accel.name, item.accel.m_value);
+    fn format_item_name(&self, series: &crate::data_loader::SeriesInfo, accel: &crate::data_loader::AccelInfo) -> String {
+        let mut name = format!("{} (m={}) ", accel.name, accel.m_value);
 
         // Add accel parameters
-        if !item.accel.additional_args.is_empty() {
-            let params: Vec<String> = item
-                .accel
+        if !accel.additional_args.is_empty() {
+            let params: Vec<String> = accel
                 .additional_args
                 .iter()
                 .map(|(k, v)| format!("{}={}", k, v))
@@ -98,12 +98,11 @@ impl DashboardApp {
             name.push_str(&format!("({}) ", params.join(", ")));
         }
 
-        name.push_str(&item.series.name);
+        name.push_str(&series.name);
 
         // Add series parameters
-        if !item.series.arguments.is_empty() {
-            let params: Vec<String> = item
-                .series
+        if !series.arguments.is_empty() {
+            let params: Vec<String> = series
                 .arguments
                 .iter()
                 .map(|(k, v)| format!("{}={}", k, v))
@@ -127,71 +126,42 @@ impl DashboardApp {
             let mut series_names = std::collections::HashSet::new();
             let mut limit_lines = Vec::new();
 
-            for item in data {
-                if item.computed.is_empty() {
+            for (series, accel_records) in data {
+                if series.computed.is_empty() {
                     continue;
                 }
 
-                let item_name = self.format_item_name(item);
-                let has_complex = item.computed.iter().any(|c| {
-                    c.accel_value
-                        .as_ref()
-                        .map_or(false, |cn| cn.imag.abs() > 1e-15)
-                });
-
-                // Main convergence line
-                let points: PlotPoints = item
-                    .computed
-                    .iter()
-                    .map(|c| [c.n as f64, c.accel_value.as_ref().map_or(0.0, |cn| cn.real)])
-                    .collect();
-
-                lines.push(Line::new(points).name(item_name.clone()));
-
-                // Imaginary part if present and enabled
-                if has_complex && self.show_imaginary {
-                    let imag_points: PlotPoints = item
-                        .computed
-                        .iter()
-                        .map(|c| [c.n as f64, c.accel_value.as_ref().map_or(0.0, |cn| cn.imag)])
-                        .collect();
-
-                    lines.push(
-                        Line::new(imag_points)
-                            .name(format!("{} (мнимая часть)", item_name))
-                            .color(egui::Color32::from_rgb(255, 165, 0)),
-                    );
-                }
-
                 // Partial sums (one per series)
-                if self.show_partial_sums && !series_names.contains(&item.series.name) {
-                    series_names.insert(item.series.name.clone());
+                if self.show_partial_sums && !series_names.contains(&series.name) {
+                    series_names.insert(series.name.clone());
 
-                    let partial_points: PlotPoints = item
+                    let has_complex = series.computed.iter().any(|c| c.value.imag.abs() > 1e-15);
+
+                    let partial_points: PlotPoints = series
                         .computed
                         .iter()
-                        .map(|c| [c.n as f64, c.partial_sum.as_ref().map_or(0.0, |cn| cn.real)])
+                        .map(|c| [c.n as f64, c.value.real])
                         .collect();
 
                     lines.push(
                         Line::new(partial_points)
-                            .name(format!("{} (частичные суммы)", item.series.name))
+                            .name(format!("{} (частичные суммы)", series.name))
                             .color(egui::Color32::from_rgb(128, 128, 128)),
                     );
 
                     // Imaginary partial sums
                     if has_complex && self.show_imaginary {
-                        let imag_partial_points: PlotPoints = item
+                        let imag_partial_points: PlotPoints = series
                             .computed
                             .iter()
-                            .map(|c| [c.n as f64, c.partial_sum.as_ref().map_or(0.0, |cn| cn.imag)])
+                            .map(|c| [c.n as f64, c.value.imag])
                             .collect();
 
                         lines.push(
                             Line::new(imag_partial_points)
                                 .name(format!(
                                     "{} (частичные суммы, мнимая часть)",
-                                    item.series.name
+                                    series.name
                                 ))
                                 .color(egui::Color32::from_rgb(255, 192, 203)),
                         );
@@ -199,16 +169,51 @@ impl DashboardApp {
                 }
 
                 // Limit line (one per series)
-                if self.show_limits && !series_names.contains(&item.series.name) {
-                    if let Some(limit) = &item.series.lim {
-                        let x_range: Vec<f64> = item.computed.iter().map(|c| c.n as f64).collect();
-                        if !x_range.is_empty() {
-                            let min_x = x_range.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-                            let max_x = x_range.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-                            let limit_points =
-                                PlotPoints::new(vec![[min_x, limit.real], [max_x, limit.real]]);
-                            limit_lines.push((item.series.name.clone(), limit_points));
-                        }
+                if self.show_limits && !series_names.contains(&series.name) {
+                    let limit = &series.series_limit;
+                    let x_range: Vec<f64> = series.computed.iter().map(|c| c.n as f64).collect();
+                    if !x_range.is_empty() {
+                        let min_x = x_range.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+                        let max_x = x_range.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+                        let limit_points =
+                            PlotPoints::new(vec![[min_x, limit.real], [max_x, limit.real]]);
+                        limit_lines.push((series.name.clone(), limit_points));
+                    }
+                }
+
+                // Process each acceleration record
+                for accel_record in accel_records {
+                    if accel_record.computed.is_empty() {
+                        continue;
+                    }
+
+                    let item_name = self.format_item_name(series, &accel_record.accel_info);
+                    let has_complex = accel_record.computed.iter().any(|cn| cn.imag.abs() > 1e-15);
+
+                    // Main convergence line - zip series computed with accel computed
+                    let points: PlotPoints = series
+                        .computed
+                        .iter()
+                        .zip(accel_record.computed.iter())
+                        .map(|(c, accel)| [c.n as f64, accel.real])
+                        .collect();
+
+                    lines.push(Line::new(points).name(item_name.clone()));
+
+                    // Imaginary part if present and enabled
+                    if has_complex && self.show_imaginary {
+                        let imag_points: PlotPoints = series
+                            .computed
+                            .iter()
+                            .zip(accel_record.computed.iter())
+                            .map(|(c, accel)| [c.n as f64, accel.imag])
+                            .collect();
+
+                        lines.push(
+                            Line::new(imag_points)
+                                .name(format!("{} (мнимая часть)", item_name))
+                                .color(egui::Color32::from_rgb(255, 165, 0)),
+                        );
                     }
                 }
             }
@@ -250,27 +255,32 @@ impl DashboardApp {
 
             let mut lines = Vec::new();
 
-            for item in data {
-                if item.computed.is_empty() {
+            for (series, accel_records) in data {
+                if series.computed.is_empty() {
                     continue;
                 }
 
-                let item_name = self.format_item_name(item);
+                for accel_record in accel_records {
+                    if accel_record.computed.is_empty() {
+                        continue;
+                    }
 
-                let points: PlotPoints = item
-                    .computed
-                    .iter()
-                    .map(|c| {
-                        let error = c
-                            .accel_value_deviation
-                            .as_ref()
-                            .map(|cn| cn.magnitude())
-                            .unwrap_or(f64::INFINITY);
-                        [c.n as f64, error.ln()] // Log scale
-                    })
-                    .collect();
+                    let item_name = self.format_item_name(series, &accel_record.accel_info);
 
-                lines.push(Line::new(points).name(item_name));
+                    // Calculate error as difference between accel value and series limit
+                    let points: PlotPoints = series
+                        .computed
+                        .iter()
+                        .zip(accel_record.computed.iter())
+                        .map(|(c, accel)| {
+                            let error = (accel.real - series.series_limit.real).abs() 
+                                      + (accel.imag - series.series_limit.imag).abs();
+                            [c.n as f64, error.ln()] // Log scale
+                        })
+                        .collect();
+
+                    lines.push(Line::new(points).name(item_name));
+                }
             }
 
             Plot::new("error")
@@ -300,33 +310,36 @@ impl DashboardApp {
 
             let mut point_series = Vec::new();
 
-            for item in data {
-                if item.computed.is_empty() {
+            for (series, accel_records) in data {
+                if series.computed.is_empty() {
                     continue;
                 }
 
-                let item_name = self.format_item_name(item);
-
-                // Find minimum error and corresponding iteration
-                let mut min_error = f64::INFINITY;
-                let mut min_error_iter = 0;
-
-                for computed in &item.computed {
-                    let error = computed
-                        .accel_value_deviation
-                        .as_ref()
-                        .map(|cn| cn.magnitude())
-                        .unwrap_or(f64::INFINITY);
-
-                    if error < min_error {
-                        min_error = error;
-                        min_error_iter = computed.n;
+                for accel_record in accel_records {
+                    if accel_record.computed.is_empty() {
+                        continue;
                     }
-                }
 
-                if min_error < f64::INFINITY {
-                    let point = PlotPoints::new(vec![[min_error_iter as f64, min_error.ln()]]);
-                    point_series.push((item_name, point));
+                    let item_name = self.format_item_name(series, &accel_record.accel_info);
+
+                    // Find minimum error and corresponding iteration
+                    let mut min_error = f64::INFINITY;
+                    let mut min_error_iter = 0;
+
+                    for (c, accel) in series.computed.iter().zip(accel_record.computed.iter()) {
+                        let error = (accel.real - series.series_limit.real).abs() 
+                                  + (accel.imag - series.series_limit.imag).abs();
+
+                        if error < min_error {
+                            min_error = error;
+                            min_error_iter = c.n;
+                        }
+                    }
+
+                    if min_error < f64::INFINITY {
+                        let point = PlotPoints::new(vec![[min_error_iter as f64, min_error.ln()]]);
+                        point_series.push((item_name, point));
+                    }
                 }
             }
 
