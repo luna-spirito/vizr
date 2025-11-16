@@ -386,7 +386,7 @@ fn filter_section(
     });
 
     egui::ScrollArea::vertical()
-        .max_height(150.0)
+        .max_height(100.0)
         .show(ui, |ui| {
             ui.group(|ui| {
                 ui.style_mut().wrap = Some(true);
@@ -414,32 +414,38 @@ impl eframe::App for DashboardApp {
         egui::SidePanel::left("filters").show(ctx, |ui| {
             ui.heading("Фильтры");
 
-            // Точность
-            filter_section(
-                ui,
-                "Точность",
-                &self.loader.metadata.precisions,
-                &mut self.filters.precisions,
-                &mut self.show_precision,
-            );
+    // Точность
+    ui.push_id("precision_filters", |ui| {
+        filter_section(
+            ui,
+            "Точность",
+            &self.loader.metadata.precisions,
+            &mut self.filters.precisions,
+            &mut self.show_precision,
+        );
+    });
 
-            // Базовые ряды
-            filter_section(
-                ui,
-                "Базовые ряды",
-                &self.loader.metadata.series_names,
-                &mut self.filters.base_series,
-                &mut self.show_series,
-            );
+    // Базовые ряды
+    ui.push_id("series_filters", |ui| {
+        filter_section(
+            ui,
+            "Базовые ряды",
+            &self.loader.metadata.series_names,
+            &mut self.filters.base_series,
+            &mut self.show_series,
+        );
+    });
 
-            // Базовые методы ускорения
-            filter_section(
-                ui,
-                "Базовые методы ускорения",
-                &self.loader.metadata.accel_names,
-                &mut self.filters.base_accel,
-                &mut self.show_accel,
-            );
+    // Базовые методы ускорения
+    ui.push_id("accel_filters", |ui| {
+        filter_section(
+            ui,
+            "Базовые методы ускорения",
+            &self.loader.metadata.accel_names,
+            &mut self.filters.base_accel,
+            &mut self.show_accel,
+        );
+    });
 
             // m_values
             ui.horizontal(|ui| {
@@ -451,22 +457,24 @@ impl eframe::App for DashboardApp {
                     self.filters.m_values.clear();
                 }
             });
-            egui::ScrollArea::vertical()
-                .max_height(100.0)
-                .show(ui, |ui| {
-                    ui.group(|ui| {
-                        for m in &self.loader.metadata.m_values {
-                            let mut checked = self.filters.m_values.contains(m);
-                            if ui.checkbox(&mut checked, format!("m={}", m)).changed() {
-                                if checked {
-                                    self.filters.m_values.insert(*m);
-                                } else {
-                                    self.filters.m_values.remove(m);
+            ui.push_id("m_values_scroll", |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(100.0)
+                    .show(ui, |ui| {
+                        ui.group(|ui| {
+                            for m in &self.loader.metadata.m_values {
+                                let mut checked = self.filters.m_values.contains(m);
+                                if ui.checkbox(&mut checked, format!("m={}", m)).changed() {
+                                    if checked {
+                                        self.filters.m_values.insert(*m);
+                                    } else {
+                                        self.filters.m_values.remove(m);
+                                    }
                                 }
                             }
-                        }
+                        });
                     });
-                });
+            });
 
             ui.separator();
 
@@ -496,23 +504,30 @@ impl eframe::App for DashboardApp {
 
         // Центральная область с графиками
         egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.push_id("main_plots_scroll", |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
                 if self.data.is_some() {
                     // Convergence plot
                     if self.show_convergence {
-                        self.create_convergence_plot(ui);
+                        ui.push_id("convergence_plot_wrapper", |ui| {
+                            self.create_convergence_plot(ui);
+                        });
                         ui.separator();
                     }
 
                     // Error plot
                     if self.show_error {
-                        self.create_error_plot(ui);
+                        ui.push_id("error_plot_wrapper", |ui| {
+                            self.create_error_plot(ui);
+                        });
                         ui.separator();
                     }
 
                     // Performance plot
                     if self.show_performance {
-                        self.create_performance_plot(ui);
+                        ui.push_id("performance_plot_wrapper", |ui| {
+                            self.create_performance_plot(ui);
+                        });
                         ui.separator();
                     }
                 } else {
@@ -520,6 +535,7 @@ impl eframe::App for DashboardApp {
                         ui.heading("Выберите фильтры и нажмите Обновить");
                     });
                 }
+            });
             });
         });
     }
