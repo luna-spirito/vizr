@@ -85,7 +85,7 @@ impl DashboardApp {
         }
     }
 
-    fn format_item_name(&self, series: &crate::data_loader::SeriesInfo, accel: &crate::data_loader::AccelInfo) -> String {
+    fn format_item_name(&self, series: &crate::data_loader::SeriesRecord, accel: &crate::data_loader::AccelInfo) -> String {
         let mut name = format!("{} (m={}) ", accel.name, accel.m_value);
 
         // Add accel parameters
@@ -188,14 +188,14 @@ impl DashboardApp {
                     }
 
                     let item_name = self.format_item_name(series, &accel_record.accel_info);
-                    let has_complex = accel_record.computed.iter().any(|cn| cn.imag.abs() > 1e-15);
+                    let has_complex = accel_record.computed.iter().any(|cn| cn.map_or(false, |c| c.imag.abs() > 1e-15));
 
                     // Main convergence line - zip series computed with accel computed
                     let points: PlotPoints = series
                         .computed
                         .iter()
                         .zip(accel_record.computed.iter())
-                        .map(|(c, accel)| [c.n as f64, accel.real])
+                        .filter_map(|(c, accel)| accel.map(|a| [c.n as f64, a.real]))
                         .collect();
 
                     lines.push(Line::new(points).name(item_name.clone()));
@@ -206,7 +206,7 @@ impl DashboardApp {
                             .computed
                             .iter()
                             .zip(accel_record.computed.iter())
-                            .map(|(c, accel)| [c.n as f64, accel.imag])
+                            .filter_map(|(c, accel)| accel.map(|a| [c.n as f64, a.imag]))
                             .collect();
 
                         lines.push(
@@ -272,11 +272,11 @@ impl DashboardApp {
                         .computed
                         .iter()
                         .zip(accel_record.computed.iter())
-                        .map(|(c, accel)| {
-                            let error = (accel.real - series.series_limit.real).abs() 
-                                      + (accel.imag - series.series_limit.imag).abs();
+                        .filter_map(|(c, accel)| accel.map(|a| {
+                            let error = (a.real - series.series_limit.real).abs() 
+                                      + (a.imag - series.series_limit.imag).abs();
                             [c.n as f64, error.ln()] // Log scale
-                        })
+                        }))
                         .collect();
 
                     lines.push(Line::new(points).name(item_name));
@@ -327,12 +327,14 @@ impl DashboardApp {
                     let mut min_error_iter = 0;
 
                     for (c, accel) in series.computed.iter().zip(accel_record.computed.iter()) {
-                        let error = (accel.real - series.series_limit.real).abs() 
-                                  + (accel.imag - series.series_limit.imag).abs();
+                        if let Some(a) = accel {
+                            let error = (a.real - series.series_limit.real).abs() 
+                                      + (a.imag - series.series_limit.imag).abs();
 
-                        if error < min_error {
-                            min_error = error;
-                            min_error_iter = c.n;
+                            if error < min_error {
+                                min_error = error;
+                                min_error_iter = c.n;
+                            }
                         }
                     }
 

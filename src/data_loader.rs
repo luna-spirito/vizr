@@ -3,30 +3,19 @@ use anyhow::{Context, Result, anyhow};
 use datafusion::arrow::array::*;
 
 use datafusion::arrow::datatypes::{
-    Float16Type, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type, UInt8Type,
-    UInt16Type, UInt32Type, UInt64Type,
+    Int8Type, Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
 };
 use datafusion::arrow::record_batch::RecordBatch;
 
 use datafusion::logical_expr::{col, lit};
 use datafusion::prelude::*;
-use regex::Regex;
+
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::iter;
 
-#[derive(Default, Clone, Serialize, Deserialize)]
-pub struct Filters {
-    pub precisions: HashSet<String>,
-    pub base_series: HashSet<String>,
-    pub base_accel: HashSet<String>,
-    pub m_values: HashSet<i32>,
-    pub accel_params: std::collections::HashMap<String, HashSet<String>>,
-    pub series_params: std::collections::HashMap<String, HashSet<String>>,
-}
-
 // Core
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct ComplexNumber {
     pub real: f64,
     pub imag: f64,
@@ -52,6 +41,8 @@ fn to_str<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<Option<&'a str>>> {
         Ok(v.iter().collect())
     } else if let Some(v) = v.as_string_view_opt() {
         Ok(v.iter().collect())
+    } else if let Some(v) = v.as_any().downcast_ref::<NullArray>() {
+        Ok(iter::repeat_with(|| None).take(v.len()).collect())
     } else {
         Err(anyhow!(
             "Expected `{name}` to be string, found {}",
@@ -78,9 +69,50 @@ fn to_i64<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<Option<i64>>> {
         Ok(v.iter().map(|x| x.map(|x| x as i64)).collect())
     } else if let Some(v) = v.as_primitive_opt::<UInt64Type>() {
         Ok(v.iter().map(|x| x.map(|x| x as i64)).collect())
+    } else if let Some(v) = v.as_any().downcast_ref::<NullArray>() {
+        Ok(iter::repeat_with(|| None).take(v.len()).collect())
     } else {
         Err(anyhow!(
             "Expected `{name}` to be int, found {}",
+            v.data_type()
+        ))
+    }
+}
+
+fn to_list<R>(
+    name: &str,
+    v: &dyn Array,
+    f: impl for<'b> Fn(&'b dyn Array) -> Result<R>,
+) -> Result<Vec<Option<R>>> {
+    if let Some(x) = v.as_list_opt::<i32>() {
+        let mut res = Vec::new();
+        for i in x.iter() {
+            res.push(if let Some(i) = i { Some(f(&i)?) } else { None });
+        }
+        Ok(res)
+    } else if let Some(x) = v.as_list_opt::<i64>() {
+        let mut res = Vec::new();
+        for i in x.iter() {
+            res.push(if let Some(i) = i { Some(f(&i)?) } else { None });
+        }
+        Ok(res)
+    } else if let Some(x) = v.as_list_view_opt::<i32>() {
+        let mut res = Vec::new();
+        for i in x.iter() {
+            res.push(if let Some(i) = i { Some(f(&i)?) } else { None });
+        }
+        Ok(res)
+    } else if let Some(x) = v.as_list_view_opt::<i64>() {
+        let mut res = Vec::new();
+        for i in x.iter() {
+            res.push(if let Some(i) = i { Some(f(&i)?) } else { None });
+        }
+        Ok(res)
+    } else if let Some(v) = v.as_any().downcast_ref::<NullArray>() {
+        Ok(iter::repeat_with(|| None).take(v.len()).collect())
+    } else {
+        Err(anyhow!(
+            "Expected `{name}` to be list, found {}",
             v.data_type()
         ))
     }
@@ -126,16 +158,17 @@ fn to_struct_str<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<HashMap<String,
     }
 }
 
-fn to_complex<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<ComplexNumber>> {
+fn to_complex<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<Option<ComplexNumber>>> {
     if let Some(v) = v.as_struct_opt() {
         if let (Some(real), Some(imag)) = (v.column_by_name("real"), v.column_by_name("imag")) {
             if let (Ok(real), Ok(imag)) = (to_str("", real), to_str("", imag)) {
                 let mut res = Vec::new();
                 for (real, imag) in real.into_iter().zip(imag) {
-                    res.push(ComplexNumber {
+                    // TODO: REMAKE!!!
+                    res.push(Some(ComplexNumber {
                         real: real.map(|x| x.parse()).transpose()?.unwrap_or(0.0),
                         imag: imag.map(|x| x.parse()).transpose()?.unwrap_or(0.0),
-                    })
+                    }))
                 }
                 return Ok(res);
             }
@@ -147,66 +180,15 @@ fn to_complex<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<ComplexNumber>> {
     ))
 }
 
-// fn to_list_complex(name: &str, v: &'a dyn Array) -> Result<Vec<ComplexNumber>> {
-//     if let Ok(x) = v.as_list_opt() {
-
-//     }
-// }
-
-fn to_list<R>(
-    name: &str,
-    v: &dyn Array,
-    f: impl for<'b> Fn(&'b dyn Array) -> Result<R>,
-) -> Result<Vec<Option<R>>> {
-    if let Some(x) = v.as_list_opt::<i32>() {
-        let mut res = Vec::new();
-        for i in x.iter() {
-            res.push(if let Some(i) = i { Some(f(&i)?) } else { None });
-        }
-        Ok(res)
-    } else if let Some(x) = v.as_list_opt::<i64>() {
-        let mut res = Vec::new();
-        for i in x.iter() {
-            res.push(if let Some(i) = i { Some(f(&i)?) } else { None });
-        }
-        Ok(res)
-    } else if let Some(x) = v.as_list_view_opt::<i32>() {
-        let mut res = Vec::new();
-        for i in x.iter() {
-            res.push(if let Some(i) = i { Some(f(&i)?) } else { None });
-        }
-        Ok(res)
-    } else if let Some(x) = v.as_list_view_opt::<i64>() {
-        let mut res = Vec::new();
-        for i in x.iter() {
-            res.push(if let Some(i) = i { Some(f(&i)?) } else { None });
-        }
-        Ok(res)
-    } else {
-        Err(anyhow!(
-            "Expected `{name}` to be list, found {}",
-            v.data_type()
-        ))
-    }
-}
-
 fn to_point<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<Point>> {
     if let Some(v) = v.as_struct_opt() {
-        if let (Some(n), Some(real), Some(imag)) = (
-            v.column_by_name("n"),
-            v.column_by_name("real"),
-            v.column_by_name("imag"),
-        ) {
-            if let (Ok(n), Ok(real), Ok(imag)) = (to_i64("", n), to_str("", real), to_str("", imag))
-            {
+        if let (Some(n), Some(value)) = (v.column_by_name("n"), v.column_by_name("value")) {
+            if let (Ok(n), Ok(value)) = (to_i64("", n), to_complex("", value)) {
                 let mut res = Vec::new();
-                for ((n, real), imag) in n.into_iter().zip(real).zip(imag) {
+                for (n, value) in n.into_iter().zip(value) {
                     res.push(Point {
                         n: n.context("n not provided")? as i32,
-                        value: ComplexNumber {
-                            real: real.map(|x| x.parse()).transpose()?.unwrap_or(0.0),
-                            imag: imag.map(|x| x.parse()).transpose()?.unwrap_or(0.0),
-                        },
+                        value: value.context("value not provided")?,
                     })
                 }
                 return Ok(res);
@@ -214,7 +196,7 @@ fn to_point<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<Point>> {
         }
     }
     Err(anyhow!(
-        "Expected `{name}` to be {{ n: int, real: str, imag: str }}, found {}",
+        "Expected `{name}` to be {{ n: int, value: {{ real: str, imag: str }} }}, found {}",
         v.data_type()
     ))
 }
@@ -328,9 +310,90 @@ impl DataLoader {
         }
         Ok(res)
     }
-}
 
-impl DataLoader {
+    async fn load_accelerations_for_series(
+        &self,
+        series_id: i32,
+        filters: &Filters,
+    ) -> Result<Vec<AccelRecord>> {
+        let mut df = self.ctx.table("accelerations").await?;
+
+        // Filter by series_id
+        df = df.filter(col("series_id").eq(lit(series_id)))?;
+
+        // Apply accel filters
+        if !filters.base_accel.is_empty() {
+            let mut filter_expr =
+                col("accel_name").eq(lit(filters.base_accel.iter().next().unwrap().clone()));
+            for a in filters.base_accel.iter().skip(1) {
+                filter_expr = filter_expr.or(col("accel_name").eq(lit(a.clone())));
+            }
+            df = df.filter(filter_expr)?;
+        }
+
+        if !filters.m_values.is_empty() {
+            let mut filter_expr = col("m_value").eq(lit(*filters.m_values.iter().next().unwrap()));
+            for m in filters.m_values.iter().skip(1) {
+                filter_expr = filter_expr.or(col("m_value").eq(lit(*m)));
+            }
+            df = df.filter(filter_expr)?;
+        }
+
+        let batches: Vec<RecordBatch> = df
+            .collect()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to execute accelerations query: {}", e))?;
+
+        let mut accel_records = Vec::new();
+        for batch in batches {
+            let accel_name = to_str(
+                "accel_name",
+                batch
+                    .column_by_name("accel_name")
+                    .context("No accel_name in accelerations")?,
+            )?;
+
+            let m_value = to_i64(
+                "m_value",
+                batch
+                    .column_by_name("m_value")
+                    .context("No m_value in accelerations")?,
+            )?;
+
+            let additional_args = if let Some(col) = batch.column_by_name("additional_args") {
+                to_struct_str("additional_args", col)?
+            } else {
+                vec![HashMap::new(); batch.num_rows()]
+            };
+
+            let computed = to_list(
+                "computed",
+                batch
+                    .column_by_name("computed")
+                    .context("No computed in accelerations")?,
+                |x| to_complex("computed.[]", x),
+            )?;
+
+            for (((accel_name, m_value), additional_args), computed) in accel_name
+                .into_iter()
+                .zip(m_value)
+                .zip(additional_args)
+                .zip(computed)
+            {
+                accel_records.push(AccelRecord {
+                    accel_info: AccelInfo {
+                        name: accel_name.context("accel_name is null")?.to_string(),
+                        m_value: m_value.context("m_value is null")? as i32,
+                        additional_args,
+                    },
+                    computed: computed.context("computed is null")?,
+                });
+            }
+        }
+
+        Ok(accel_records)
+    }
+
     pub async fn filter_data(
         &self,
         filters: &Filters,
@@ -401,20 +464,28 @@ impl DataLoader {
                 .zip(series_limit)
                 .zip(computed)
             {
-                let accels = todo!();
+                let series_id = series_id.context("series_id is null")? as i32;
+                let series_name = series_name.context("name is null")?.to_string();
+                let computed = computed.context("computed is null")?;
+
+                // Load accelerations for this series
+                let accels = self
+                    .load_accelerations_for_series(series_id, filters)
+                    .await?;
+
                 result.push((
                     SeriesRecord {
-                        series_id: series_id.context("series_id is null")? as i32,
-                        name: series_name.context("name is null")?.to_string(),
+                        series_id,
+                        name: series_name,
                         arguments,
-                        series_limit,
-                        computed: computed.context("computed is null")?,
+                        series_limit: series_limit.unwrap_or_default(),
+                        computed,
                     },
                     accels,
                 ));
             }
         }
-
+        println!("filtering complete");
         Ok(result)
     }
 }
