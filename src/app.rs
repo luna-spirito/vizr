@@ -422,140 +422,214 @@ fn filter_section_horizontal(
     ui.add_space(5.0);
 }
 
+// Generate UI for parameter-based filtering
+fn param_filter_section(
+    ui: &mut egui::Ui,
+    title: &str,
+    param_info: &std::collections::HashMap<String, Vec<String>>,
+    selected_params: &mut std::collections::HashMap<String, std::collections::HashSet<String>>,
+) {
+    if param_info.is_empty() {
+        return;
+    }
+
+    ui.heading(title);
+    ui.add_space(2.0);
+
+    for (param_name, values) in param_info {
+        // Get current selection, but don't create empty entry automatically
+        let param_selected = selected_params.get(param_name).cloned().unwrap_or_default();
+        
+        // Compact inline layout: parameter name, All/None buttons, and checkboxes all in one wrapped section
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("{}:", param_name));
+            
+            let mut new_selection = param_selected.clone();
+            
+            if ui.button("All").clicked() {
+                new_selection.extend(values.iter().cloned());
+            }
+            if ui.button("None").clicked() {
+                new_selection.clear();
+            }
+            
+            // Add checkboxes inline with the parameter name and buttons
+            for value in values {
+                let mut checked = new_selection.contains(value);
+                if ui.checkbox(&mut checked, value).changed() {
+                    if checked {
+                        new_selection.insert(value.clone());
+                    } else {
+                        new_selection.remove(value);
+                    }
+                }
+            }
+            
+            // Only store the selection if it's not empty, otherwise remove the entry
+            if new_selection.is_empty() {
+                selected_params.remove(param_name);
+            } else {
+                selected_params.insert(param_name.clone(), new_selection);
+            }
+        });
+        ui.add_space(1.0);
+    }
+    ui.add_space(2.0);
+}
+
 impl eframe::App for DashboardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Проверяем наличие новых данных от фоновых потоков
         self.check_for_data();
 
-        // Верхняя панель с фильтрами
-        egui::TopBottomPanel::top("filters").show(ctx, |ui| {
-            ui.heading("Фильтры");
-            ui.add_space(5.0);
+        // Единая прокручиваемая область для всего контента
+        egui::CentralPanel::default().show(ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                // Фильтры
+                ui.heading("Фильтры");
+                ui.add_space(5.0);
 
-            // Точность
-            ui.push_id("precision_filters", |ui| {
-                filter_section_horizontal(
-                    ui,
-                    "Точность",
-                    &self.loader.metadata.precisions,
-                    &mut self.filters.precisions,
-                    &mut self.show_precision,
-                );
-            });
-
-            // Базовые ряды
-            ui.push_id("series_filters", |ui| {
-                filter_section_horizontal(
-                    ui,
-                    "Базовые ряды",
-                    &self.loader.metadata.series_names,
-                    &mut self.filters.base_series,
-                    &mut self.show_series,
-                );
-            });
-
-            // Базовые методы ускорения
-            ui.push_id("accel_filters", |ui| {
-                filter_section_horizontal(
-                    ui,
-                    "Базовые методы ускорения",
-                    &self.loader.metadata.accel_names,
-                    &mut self.filters.base_accel,
-                    &mut self.show_accel,
-                );
-            });
-
-            // m_values
-            ui.push_id("m_values_filters", |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Значения m:");
-                    if ui.button("All").clicked() {
-                        self.filters.m_values.extend(&self.loader.metadata.m_values);
-                    }
-                    if ui.button("None").clicked() {
-                        self.filters.m_values.clear();
-                    }
+                // Точность
+                ui.push_id("precision_filters", |ui| {
+                    filter_section_horizontal(
+                        ui,
+                        "Точность",
+                        &self.loader.metadata.precisions,
+                        &mut self.filters.precisions,
+                        &mut self.show_precision,
+                    );
                 });
 
-                // Use wrapping layout for m_values checkboxes
-                ui.horizontal_wrapped(|ui| {
-                    for m in &self.loader.metadata.m_values {
-                        let mut checked = self.filters.m_values.contains(m);
-                        if ui.checkbox(&mut checked, format!("m={}", m)).changed() {
-                            if checked {
-                                self.filters.m_values.insert(*m);
-                            } else {
-                                self.filters.m_values.remove(m);
+                // Базовые ряды
+                ui.push_id("series_filters", |ui| {
+                    filter_section_horizontal(
+                        ui,
+                        "Базовые ряды",
+                        &self.loader.metadata.series_names,
+                        &mut self.filters.base_series,
+                        &mut self.show_series,
+                    );
+                });
+
+                // Параметры рядов (перемещено сюда)
+                ui.push_id("series_params_filters", |ui| {
+                    param_filter_section(
+                        ui,
+                        "Параметры рядов",
+                        &self.loader.metadata.series_param_info,
+                        &mut self.filters.series_params,
+                    );
+                });
+
+                // Базовые методы ускорения
+                ui.push_id("accel_filters", |ui| {
+                    filter_section_horizontal(
+                        ui,
+                        "Базовые методы ускорения",
+                        &self.loader.metadata.accel_names,
+                        &mut self.filters.base_accel,
+                        &mut self.show_accel,
+                    );
+                });
+
+                // m_values
+                ui.push_id("m_values_filters", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Значения m:");
+                        if ui.button("All").clicked() {
+                            self.filters.m_values.extend(&self.loader.metadata.m_values);
+                        }
+                        if ui.button("None").clicked() {
+                            self.filters.m_values.clear();
+                        }
+                    });
+
+                    // Use wrapping layout for m_values checkboxes
+                    ui.horizontal_wrapped(|ui| {
+                        for m in &self.loader.metadata.m_values {
+                            let mut checked = self.filters.m_values.contains(m);
+                            if ui.checkbox(&mut checked, format!("m={}", m)).changed() {
+                                if checked {
+                                    self.filters.m_values.insert(*m);
+                                } else {
+                                    self.filters.m_values.remove(m);
+                                }
                             }
                         }
-                    }
+                    });
                 });
-            });
 
-            ui.separator();
+                // Параметры ускорения
+                ui.push_id("accel_params_filters", |ui| {
+                    param_filter_section(
+                        ui,
+                        "Параметры ускорения",
+                        &self.loader.metadata.accel_param_info,
+                        &mut self.filters.accel_params,
+                    );
+                });
 
-            // Plot options
-            ui.horizontal(|ui| {
-                ui.label("Опции графиков:");
-            });
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Опции графиков:");
-                ui.checkbox(&mut self.show_partial_sums, "Частичные суммы");
-                ui.checkbox(&mut self.show_limits, "Пределы");
-                ui.checkbox(&mut self.show_imaginary, "Мнимые части");
-            });
+                ui.separator();
 
-            ui.separator();
+                // Plot options
+                ui.horizontal(|ui| {
+                    ui.label("Опции графиков:");
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Опции графиков:");
+                    ui.checkbox(&mut self.show_partial_sums, "Частичные суммы");
+                    ui.checkbox(&mut self.show_limits, "Пределы");
+                    ui.checkbox(&mut self.show_imaginary, "Мнимые части");
+                });
 
-            // Кнопка Обновить и счетчик данных
-            ui.horizontal(|ui| {
-                if self.loading {
-                    ui.spinner();
-                    ui.label("Загрузка...");
-                } else {
-                    if ui.button("🔄 Обновить графики").clicked() {
-                        self.update_data();
-                    }
-                }
-                if let Some(ref data) = self.data {
-                    ui.label(format!("Загружено записей: {}", data.len()));
-                }
-            });
-        });
+                ui.separator();
 
-        // Центральная область с графиками
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.push_id("main_plots_scroll", |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    if self.data.is_some() {
-                        // Convergence plot
-                        ui.collapsing("Сходимость методов", |ui| {
-                            self.create_convergence_plot(ui);
-                        });
-
-                        // Error plot
-                        ui.collapsing("Ошибка сходимости", |ui| {
-                            self.create_error_plot(ui);
-                        });
-
-                        // Performance plot
-                        ui.collapsing("Производительность методов", |ui| {
-                            self.create_performance_plot(ui);
-                        });
-                    } else if self.loading {
-                        ui.centered_and_justified(|ui| {
-                            ui.add_space(50.0);
-                            ui.spinner();
-                            ui.add_space(20.0);
-                            ui.heading("Загрузка данных...");
-                            ui.label("Пожалуйста, подождите пока фильтры применяются к данным");
-                        });
+                // Кнопка Обновить и счетчик данных
+                ui.horizontal(|ui| {
+                    if self.loading {
+                        ui.spinner();
+                        ui.label("Загрузка...");
                     } else {
-                        ui.centered_and_justified(|ui| {
-                            ui.heading("Выберите фильтры и нажмите Обновить");
-                        });
+                        if ui.button("🔄 Обновить графики").clicked() {
+                            self.update_data();
+                        }
+                    }
+                    if let Some(ref data) = self.data {
+                        ui.label(format!("Загружено записей: {}", data.len()));
                     }
                 });
+
+                ui.add_space(20.0);
+
+                // Графики
+                if self.data.is_some() {
+                    // Convergence plot
+                    ui.collapsing("Сходимость методов", |ui| {
+                        self.create_convergence_plot(ui);
+                    });
+
+                    // Error plot
+                    ui.collapsing("Ошибка сходимости", |ui| {
+                        self.create_error_plot(ui);
+                    });
+
+                    // Performance plot
+                    ui.collapsing("Производительность методов", |ui| {
+                        self.create_performance_plot(ui);
+                    });
+                } else if self.loading {
+                    ui.centered_and_justified(|ui| {
+                        ui.add_space(50.0);
+                        ui.spinner();
+                        ui.add_space(20.0);
+                        ui.heading("Загрузка данных...");
+                        ui.label("Пожалуйста, подождите пока фильтры применяются к данным");
+                    });
+                } else {
+                    ui.centered_and_justified(|ui| {
+                        ui.heading("Выберите фильтры и нажмите Обновить");
+                    });
+                }
             });
         });
     }

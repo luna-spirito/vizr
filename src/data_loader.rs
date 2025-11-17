@@ -89,6 +89,52 @@ pub struct Filters {
     pub accel_params: HashMap<String, HashSet<String>>,
     pub series_params: HashMap<String, HashSet<String>>,
 }
+
+// Check if parameters match the filters (handling k=null case)
+fn params_match_filters(
+    params: &HashMap<String, String>,
+    filters: &HashMap<String, HashSet<String>>,
+) -> bool {
+    // If no filters are set, everything matches
+    if filters.is_empty() {
+        return true;
+    }
+
+    // Check if any filter has actual values (not empty sets)
+    let has_active_filters = filters.values().any(|set| !set.is_empty());
+    if !has_active_filters {
+        return true;
+    }
+
+    for (param_name, filter_values) in filters {
+        // Skip empty filter sets
+        if filter_values.is_empty() {
+            continue;
+        }
+
+        if let Some(param_value) = params.get(param_name) {
+            // Special case: if parameter value is "null" and filter is for "k"
+            // then it should match any filter value for "k"
+            if param_name == "k" && param_value == "null" {
+                continue; // k=null matches any filter for k
+            }
+            
+            // Parameter exists, check if its value is in the filter set
+            if !filter_values.contains(param_value) {
+                return false;
+            }
+        } else {
+            // Parameter doesn't exist in this record
+            // Check if "null" is in the filter values - if so, this matches
+            // Otherwise, this record doesn't match
+            if !filter_values.contains("null") {
+                return false;
+            }
+        }
+    }
+
+    true
+}
 // Core
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct ComplexNumber {
@@ -346,15 +392,55 @@ impl DataLoader {
         let accel_names = Self::get_unique_strings(ctx, "accelerations", "accel_name").await?;
         println!("collecting m_values");
         let m_values = Self::get_unique_m_values(ctx).await?;
+        
+        println!("collecting accel_param_info");
+        let accel_param_info = Self::get_unique_param_info(ctx, "accelerations", "additional_args").await?;
+        
+        println!("collecting series_param_info");
+        let series_param_info = Self::get_unique_param_info(ctx, "series", "arguments").await?;
 
         Ok(Metadata {
             precisions,
             series_names,
             accel_names,
             m_values,
-            accel_param_info: HashMap::new(), // TODO: extract from struct
-            series_param_info: HashMap::new(), // TODO: extract from struct
+            accel_param_info,
+            series_param_info,
         })
+    }
+
+    // Extract unique parameter names and values from struct fields
+    async fn get_unique_param_info(
+        ctx: &SessionContext,
+        table: &str,
+        column: &str,
+    ) -> Result<HashMap<String, Vec<String>>> {
+        let df = ctx.table(table).await?;
+        let df = df.select(vec![col(column)])?;
+        let batches: Vec<RecordBatch> = df.collect().await.map_err(|e| {
+            anyhow::anyhow!("Failed to get unique {} from {}: {}", column, table, e)
+        })?;
+
+        let mut param_info: HashMap<String, Vec<String>> = HashMap::new();
+
+        for batch in batches {
+            let col = batch.column_by_name(column).context("column not found")?;
+            let param_maps = to_struct_str(column, col)?;
+            
+            for param_map in param_maps {
+                for (key, value) in param_map {
+                    param_info.entry(key).or_insert_with(Vec::new).push(value);
+                }
+            }
+        }
+
+        // Remove duplicates and sort each parameter's values
+        for values in param_info.values_mut() {
+            values.sort();
+            values.dedup();
+        }
+
+        Ok(param_info)
     }
 
     // Not null
@@ -535,10 +621,19 @@ impl DataLoader {
                 .zip(computed)
             {
                 let series_id = series_id.context("series_id is null")? as i32;
+                let accel_name = accel_name.context("accel_name is null")?.to_string();
+                let m_value = m_value.context("m_value is null")? as i32;
+                let additional_args = additional_args;
+
+                // Apply accel_params filtering
+                if !params_match_filters(&additional_args, &filters.accel_params) {
+                    continue;
+                }
+
                 let accel_record = AccelRecord {
                     accel_info: AccelInfo {
-                        name: accel_name.context("accel_name is null")?.to_string(),
-                        m_value: m_value.context("m_value is null")? as i32,
+                        name: accel_name,
+                        m_value,
                         additional_args,
                     },
                     computed: computed.context("computed is null")?,
@@ -654,7 +749,13 @@ impl DataLoader {
             {
                 let series_id = series_id.context("series_id is null")? as i32;
                 let series_name = series_name.context("name is null")?.to_string();
+                let arguments = arguments;
                 let computed = computed.context("computed is null")?;
+
+                // Apply series_params filtering
+                if !params_match_filters(&arguments, &filters.series_params) {
+                    continue;
+                }
 
                 series_ids.push(series_id);
                 series_records.push(SeriesRecord {
