@@ -14,6 +14,7 @@ pub struct DashboardApp {
     show_partial_sums: bool,
     show_limits: bool,
     show_imaginary: bool,
+    show_deviation: bool,
     // Каналы для асинхронной загрузки данных
     data_sender: Option<mpsc::Sender<Result<Vec<DataItem>>>>,
     data_receiver: Option<mpsc::Receiver<Result<Vec<DataItem>>>>,
@@ -31,6 +32,7 @@ impl DashboardApp {
             show_partial_sums: true,
             show_limits: true,
             show_imaginary: true,
+            show_deviation: false,
             data_sender: Some(tx),
             data_receiver: Some(rx),
             loading: false,
@@ -189,14 +191,14 @@ impl DashboardApp {
                     let has_complex = accel_record
                         .computed
                         .iter()
-                        .any(|cn| cn.map_or(false, |c| c.imag.abs() > 1e-15));
+                        .any(|cn| cn.map_or(false, |ap| ap.value.imag.abs() > 1e-15));
 
                     // Main convergence line - zip series computed with accel computed
                     let points: PlotPoints = series
                         .computed
                         .iter()
                         .zip(accel_record.computed.iter())
-                        .filter_map(|(c, accel)| accel.map(|a| [c.n as f64, a.real]))
+                        .filter_map(|(c, accel)| accel.map(|ap| [c.n as f64, ap.value.real]))
                         .collect();
 
                     lines.push(Line::new(points).name(item_name.clone()));
@@ -207,13 +209,48 @@ impl DashboardApp {
                             .computed
                             .iter()
                             .zip(accel_record.computed.iter())
-                            .filter_map(|(c, accel)| accel.map(|a| [c.n as f64, a.imag]))
+                            .filter_map(|(c, accel)| accel.map(|ap| [c.n as f64, ap.value.imag]))
                             .collect();
 
                         lines.push(
                             Line::new(imag_points)
                                 .name(format!("{} (мнимая часть)", item_name))
                                 .color(egui::Color32::from_rgb(255, 165, 0)),
+                        );
+                    }
+
+                    // Deviation bands if enabled
+                    if self.show_deviation {
+                        let deviation_upper: PlotPoints = series
+                            .computed
+                            .iter()
+                            .zip(accel_record.computed.iter())
+                            .filter_map(|(c, accel)| {
+                                accel.map(|ap| [c.n as f64, ap.value.real + ap.deviation.real])
+                            })
+                            .collect();
+
+                        let deviation_lower: PlotPoints = series
+                            .computed
+                            .iter()
+                            .zip(accel_record.computed.iter())
+                            .filter_map(|(c, accel)| {
+                                accel.map(|ap| [c.n as f64, ap.value.real - ap.deviation.real])
+                            })
+                            .collect();
+
+                        lines.push(
+                            Line::new(deviation_upper)
+                                .name(format!("{} (верхняя граница отклонения)", item_name))
+                                .color(egui::Color32::from_rgb(100, 200, 100))
+                                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 200, 100))),
+                        );
+
+                        lines.push(
+                            Line::new(deviation_lower)
+                                .name(format!("{} (нижняя граница отклонения)", item_name))
+                                .color(egui::Color32::from_rgb(100, 200, 100))
+                                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 200, 100))),
                         );
                     }
                 }
@@ -274,15 +311,14 @@ impl DashboardApp {
 
                     let item_name = self.format_item_name(series, &accel_record.accel_info);
 
-                    // Calculate error as difference between accel value and series limit
+                    // Use provided deviation instead of calculating error
                     let points: PlotPoints = series
                         .computed
                         .iter()
                         .zip(accel_record.computed.iter())
                         .filter_map(|(c, accel)| {
-                            accel.map(|a| {
-                                let error = (a.real - series.series_limit.real).abs()
-                                    + (a.imag - series.series_limit.imag).abs();
+                            accel.map(|ap| {
+                                let error = ap.deviation.real.abs() + ap.deviation.imag.abs();
                                 [c.n as f64, error.ln()] // Log scale
                             })
                         })
@@ -334,9 +370,8 @@ impl DashboardApp {
                     let mut min_error_iter = 0;
 
                     for (c, accel) in series.computed.iter().zip(accel_record.computed.iter()) {
-                        if let Some(a) = accel {
-                            let error = (a.real - series.series_limit.real).abs()
-                                + (a.imag - series.series_limit.imag).abs();
+                        if let Some(ap) = accel {
+                            let error = ap.deviation.real.abs() + ap.deviation.imag.abs();
 
                             if error < min_error {
                                 min_error = error;
@@ -571,6 +606,7 @@ impl eframe::App for DashboardApp {
                     ui.checkbox(&mut self.show_partial_sums, "Частичные суммы");
                     ui.checkbox(&mut self.show_limits, "Пределы");
                     ui.checkbox(&mut self.show_imaginary, "Мнимые части");
+                    ui.checkbox(&mut self.show_deviation, "Отклонения");
                 });
 
                 ui.separator();

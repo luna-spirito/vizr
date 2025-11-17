@@ -278,7 +278,7 @@ fn to_complex<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<Option<ComplexNumb
         if let (Some(real), Some(imag)) = (v.column_by_name("real"), v.column_by_name("imag")) {
             if let (Ok(real), Ok(imag)) = (to_str("", real), to_str("", imag)) {
                 let mut res = Vec::new();
-                for (i, (real, imag)) in (0..).zip(real.into_iter().zip(imag)) {
+                for (i, (real, imag)) in real.into_iter().zip(imag).enumerate() {
                     res.push(if v.is_null(i) {
                         None
                     } else {
@@ -319,6 +319,33 @@ fn to_point<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<Point>> {
     ))
 }
 
+fn to_accel_point<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<Option<AccelPoint>>> {
+    if let Some(v) = v.as_struct_opt() {
+        if let (Some(value), Some(deviation)) =
+            (v.column_by_name("value"), v.column_by_name("deviation"))
+        {
+            if let (Ok(value), Ok(deviation)) = (to_complex("", value), to_complex("", deviation)) {
+                let mut res = Vec::new();
+                for (i, (value, deviation)) in value.into_iter().zip(deviation).enumerate() {
+                    res.push(if v.is_null(i) {
+                        None
+                    } else {
+                        Some(AccelPoint {
+                            value: value.context("no value in accel point")?,
+                            deviation: deviation.context("no deviation in accel point")?,
+                        })
+                    });
+                }
+                return Ok(res);
+            }
+        }
+    }
+    Err(anyhow!(
+        "Expected `{name}` to be {{ value: {{ real: str, imag: str }}, deviation: {{ real: str, imag: str }} }}, found {}",
+        v.data_type()
+    ))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SeriesRecord {
     pub series_id: i32,
@@ -335,10 +362,16 @@ pub struct AccelInfo {
     pub additional_args: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct AccelPoint {
+    pub value: ComplexNumber,
+    pub deviation: ComplexNumber,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccelRecord {
     pub accel_info: AccelInfo,
-    pub computed: Vec<Option<ComplexNumber>>,
+    pub computed: Vec<Option<AccelPoint>>,
 }
 
 pub type DataItem = (SeriesRecord, Vec<AccelRecord>);
@@ -614,7 +647,7 @@ impl DataLoader {
                 batch
                     .column_by_name("computed")
                     .context("No computed in accelerations")?,
-                |x| to_complex("computed.[]", x),
+                |x| to_accel_point("computed.[]", x),
             )?;
 
             for ((((series_id, accel_name), m_value), additional_args), computed) in series_id
