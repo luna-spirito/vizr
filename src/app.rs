@@ -28,7 +28,6 @@ impl DashboardApp {
             loader,
             filters: Filters::default(),
             data: None,
-
             show_partial_sums: true,
             show_limits: true,
             show_imaginary: true,
@@ -117,7 +116,7 @@ impl DashboardApp {
             let mut lines = Vec::new();
             let mut series_names = std::collections::HashSet::new();
             let mut limit_lines = Vec::new();
-            
+
             // Calculate Y range based on series limits
             let mut min_limit = f64::INFINITY;
             let mut max_limit = f64::NEG_INFINITY;
@@ -236,14 +235,14 @@ impl DashboardApp {
                 .height(600.0)
                 .x_axis_label("Итерация n")
                 .y_axis_label("Значение");
-            
+
             // Set default Y range if we have valid limits
             if min_limit != f64::INFINITY && max_limit != f64::NEG_INFINITY {
                 plot = plot.auto_bounds(egui::Vec2b::new(false, true)) // Disable auto bounds for Y
                     .include_y(min_limit)
                     .include_y(max_limit);
             }
-            
+
             plot.show(ui, |plot_ui| {
                 for line in lines {
                     plot_ui.line(line);
@@ -428,20 +427,20 @@ fn param_filter_section(
     for (param_name, values) in param_info {
         // Get current selection, but don't create empty entry automatically
         let param_selected = selected_params.get(param_name).cloned().unwrap_or_default();
-        
+
         // Compact inline layout: parameter name, All/None buttons, and checkboxes all in one wrapped section
         ui.horizontal_wrapped(|ui| {
             ui.label(format!("{}:", param_name));
-            
+
             let mut new_selection = param_selected.clone();
-            
+
             if ui.button("All").clicked() {
                 new_selection.extend(values.iter().cloned());
             }
             if ui.button("None").clicked() {
                 new_selection.clear();
             }
-            
+
             // Add checkboxes inline with the parameter name and buttons
             for value in values {
                 let mut checked = new_selection.contains(value);
@@ -453,7 +452,7 @@ fn param_filter_section(
                     }
                 }
             }
-            
+
             // Only store the selection if it's not empty, otherwise remove the entry
             if new_selection.is_empty() {
                 selected_params.remove(param_name);

@@ -118,7 +118,7 @@ fn params_match_filters(
             if param_name == "k" && param_value == "null" {
                 continue; // k=null matches any filter for k
             }
-            
+
             // Parameter exists, check if its value is in the filter set
             if !filter_values.contains(param_value) {
                 return false;
@@ -278,12 +278,15 @@ fn to_complex<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<Option<ComplexNumb
         if let (Some(real), Some(imag)) = (v.column_by_name("real"), v.column_by_name("imag")) {
             if let (Ok(real), Ok(imag)) = (to_str("", real), to_str("", imag)) {
                 let mut res = Vec::new();
-                for (real, imag) in real.into_iter().zip(imag) {
-                    // TODO: REMAKE!!!
-                    res.push(Some(ComplexNumber {
-                        real: real.map(|x| x.parse()).transpose()?.unwrap_or(0.0),
-                        imag: imag.map(|x| x.parse()).transpose()?.unwrap_or(0.0),
-                    }))
+                for (i, (real, imag)) in (0..).zip(real.into_iter().zip(imag)) {
+                    res.push(if v.is_null(i) {
+                        None
+                    } else {
+                        Some(ComplexNumber {
+                            real: real.context("real is null")?.parse()?,
+                            imag: imag.map(|x| x.parse()).transpose()?.unwrap_or(0.0),
+                        })
+                    })
                 }
                 return Ok(res);
             }
@@ -392,10 +395,11 @@ impl DataLoader {
         let accel_names = Self::get_unique_strings(ctx, "accelerations", "accel_name").await?;
         println!("collecting m_values");
         let m_values = Self::get_unique_m_values(ctx).await?;
-        
+
         println!("collecting accel_param_info");
-        let accel_param_info = Self::get_unique_param_info(ctx, "accelerations", "additional_args").await?;
-        
+        let accel_param_info =
+            Self::get_unique_param_info(ctx, "accelerations", "additional_args").await?;
+
         println!("collecting series_param_info");
         let series_param_info = Self::get_unique_param_info(ctx, "series", "arguments").await?;
 
@@ -426,7 +430,7 @@ impl DataLoader {
         for batch in batches {
             let col = batch.column_by_name(column).context("column not found")?;
             let param_maps = to_struct_str(column, col)?;
-            
+
             for param_map in param_maps {
                 for (key, value) in param_map {
                     param_info.entry(key).or_insert_with(Vec::new).push(value);
