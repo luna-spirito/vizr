@@ -14,7 +14,7 @@ pub struct DashboardApp {
     show_partial_sums: bool,
     show_limits: bool,
     show_imaginary: bool,
-    show_deviation: bool,
+
     // Каналы для асинхронной загрузки данных
     data_sender: Option<mpsc::Sender<Result<Vec<DataItem>>>>,
     data_receiver: Option<mpsc::Receiver<Result<Vec<DataItem>>>>,
@@ -32,7 +32,6 @@ impl DashboardApp {
             show_partial_sums: true,
             show_limits: true,
             show_imaginary: true,
-            show_deviation: false,
             data_sender: Some(tx),
             data_receiver: Some(rx),
             loading: false,
@@ -76,6 +75,22 @@ impl DashboardApp {
         }
     }
 
+    fn format_series_name_with_args(&self, series: &crate::data_loader::SeriesRecord) -> String {
+        let mut name = series.name.clone();
+
+        // Add series parameters
+        if !series.arguments.is_empty() {
+            let params: Vec<String> = series
+                .arguments
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect();
+            name.push_str(&format!(" ({})", params.join(", ")));
+        }
+
+        name
+    }
+
     fn format_item_name(
         &self,
         series: &crate::data_loader::SeriesRecord,
@@ -116,16 +131,19 @@ impl DashboardApp {
             }
 
             let mut lines = Vec::new();
-            let mut series_names = std::collections::HashSet::new();
+            let mut partial_sum_series = std::collections::HashSet::new();
+            let mut limit_series = std::collections::HashSet::new();
             let mut limit_lines = Vec::new();
 
-            // Calculate Y range based on series limits
-            let mut min_limit = f64::INFINITY;
-            let mut max_limit = f64::NEG_INFINITY;
+            // Calculate X range for 1:1 aspect ratio with fixed Y bounds [-10, 10]
+            let mut min_x = f64::INFINITY;
+            let mut max_x = f64::NEG_INFINITY;
             for (series, _) in data {
                 if !series.computed.is_empty() {
-                    min_limit = min_limit.min(series.series_limit.real - 10.0);
-                    max_limit = max_limit.max(series.series_limit.real + 10.0);
+                    for point in &series.computed {
+                        min_x = min_x.min(point.n as f64);
+                        max_x = max_x.max(point.n as f64);
+                    }
                 }
             }
 
@@ -135,8 +153,8 @@ impl DashboardApp {
                 }
 
                 // Partial sums (one per series)
-                if self.show_partial_sums && !series_names.contains(&series.name) {
-                    series_names.insert(series.name.clone());
+                if self.show_partial_sums && !partial_sum_series.contains(&series.name) {
+                    partial_sum_series.insert(series.name.clone());
 
                     let has_complex = series.computed.iter().any(|c| c.value.imag.abs() > 1e-15);
 
@@ -148,7 +166,7 @@ impl DashboardApp {
 
                     lines.push(
                         Line::new(partial_points)
-                            .name(format!("{} (частичные суммы)", series.name))
+                            .name(format!("{} (частичные суммы)", self.format_series_name_with_args(series)))
                             .color(egui::Color32::from_rgb(128, 128, 128)),
                     );
 
@@ -162,14 +180,14 @@ impl DashboardApp {
 
                         lines.push(
                             Line::new(imag_partial_points)
-                                .name(format!("{} (частичные суммы, мнимая часть)", series.name))
+                                .name(format!("{} (частичные суммы, мнимая часть)", self.format_series_name_with_args(series)))
                                 .color(egui::Color32::from_rgb(255, 192, 203)),
                         );
                     }
                 }
 
                 // Limit line (one per series)
-                if self.show_limits && !series_names.contains(&series.name) {
+                if self.show_limits && !limit_series.contains(&series.name) {
                     let limit = &series.series_limit;
                     let x_range: Vec<f64> = series.computed.iter().map(|c| c.n as f64).collect();
                     if !x_range.is_empty() {
@@ -177,6 +195,7 @@ impl DashboardApp {
                         let max_x = x_range.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
                         let limit_points =
                             PlotPoints::new(vec![[min_x, limit.real], [max_x, limit.real]]);
+                        limit_series.insert(series.name.clone());
                         limit_lines.push((series.name.clone(), limit_points));
                     }
                 }
@@ -219,51 +238,21 @@ impl DashboardApp {
                         );
                     }
 
-                    // Deviation bands if enabled
-                    if self.show_deviation {
-                        let deviation_upper: PlotPoints = series
-                            .computed
-                            .iter()
-                            .zip(accel_record.computed.iter())
-                            .filter_map(|(c, accel)| {
-                                accel.map(|ap| [c.n as f64, ap.value.real + ap.deviation.real])
-                            })
-                            .collect();
 
-                        let deviation_lower: PlotPoints = series
-                            .computed
-                            .iter()
-                            .zip(accel_record.computed.iter())
-                            .filter_map(|(c, accel)| {
-                                accel.map(|ap| [c.n as f64, ap.value.real - ap.deviation.real])
-                            })
-                            .collect();
-
-                        lines.push(
-                            Line::new(deviation_upper)
-                                .name(format!("{} (верхняя граница отклонения)", item_name))
-                                .color(egui::Color32::from_rgb(100, 200, 100))
-                                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 200, 100))),
-                        );
-
-                        lines.push(
-                            Line::new(deviation_lower)
-                                .name(format!("{} (нижняя граница отклонения)", item_name))
-                                .color(egui::Color32::from_rgb(100, 200, 100))
-                                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 200, 100))),
-                        );
-                    }
                 }
             }
 
             // Add limit lines
             for (series_name, points) in limit_lines {
-                lines.push(
-                    Line::new(points)
-                        .name(format!("{} (предел)", series_name))
-                        .color(egui::Color32::from_rgb(255, 0, 0))
-                        .stroke(egui::Stroke::new(3.0, egui::Color32::from_rgb(255, 0, 0))),
-                );
+                // Find the series record to get arguments
+                if let Some((series, _)) = data.iter().find(|(s, _)| s.name == series_name) {
+                    lines.push(
+                        Line::new(points)
+                            .name(format!("{} (предел)", self.format_series_name_with_args(series)))
+                            .color(egui::Color32::from_rgb(255, 0, 0))
+                            .stroke(egui::Stroke::new(3.0, egui::Color32::from_rgb(255, 0, 0))),
+                    );
+                }
             }
 
             let mut plot = Plot::new("convergence")
@@ -273,11 +262,23 @@ impl DashboardApp {
                 .x_axis_label("Итерация n")
                 .y_axis_label("Значение");
 
-            // Set default Y range if we have valid limits
-            if min_limit != f64::INFINITY && max_limit != f64::NEG_INFINITY {
-                plot = plot.auto_bounds(egui::Vec2b::new(false, true)) // Disable auto bounds for Y
-                    .include_y(min_limit)
-                    .include_y(max_limit);
+            // Set fixed Y bounds [-10, 10] and calculate X bounds for 1:1 aspect ratio
+            if min_x != f64::INFINITY && max_x != f64::NEG_INFINITY {
+                // Y range is fixed at 20 units (from -10 to 10)
+                let y_range = 20.0;
+                let data_x_range = max_x - min_x;
+                
+                // Center X range around data, but ensure it's at least as wide as Y range for 1:1 aspect ratio
+                let x_range = data_x_range.max(y_range);
+                let x_center = (min_x + max_x) / 2.0;
+                let x_min = x_center - x_range / 2.0;
+                let x_max = x_center + x_range / 2.0;
+                
+                plot = plot.auto_bounds(egui::Vec2b::new(false, false)) // Disable auto bounds for both axes
+                    .include_x(x_min)
+                    .include_x(x_max)
+                    .include_y(-10.0)
+                    .include_y(10.0);
             }
 
             plot.show(ui, |plot_ui| {
@@ -311,15 +312,15 @@ impl DashboardApp {
 
                     let item_name = self.format_item_name(series, &accel_record.accel_info);
 
-                    // Use provided deviation instead of calculating error
+                    // Use Euclidean metric with machine epsilon for log scale
                     let points: PlotPoints = series
                         .computed
                         .iter()
                         .zip(accel_record.computed.iter())
                         .filter_map(|(c, accel)| {
                             accel.map(|ap| {
-                                let error = ap.deviation.real.abs() + ap.deviation.imag.abs();
-                                [c.n as f64, error.ln()] // Log scale
+                                let error = (ap.deviation.real.powi(2) + ap.deviation.imag.powi(2)).sqrt();
+                                [c.n as f64, (error + f64::EPSILON).ln()] // Log scale with epsilon
                             })
                         })
                         .collect();
@@ -371,7 +372,7 @@ impl DashboardApp {
 
                     for (c, accel) in series.computed.iter().zip(accel_record.computed.iter()) {
                         if let Some(ap) = accel {
-                            let error = ap.deviation.real.abs() + ap.deviation.imag.abs();
+                            let error = (ap.deviation.real.powi(2) + ap.deviation.imag.powi(2)).sqrt();
 
                             if error < min_error {
                                 min_error = error;
@@ -381,7 +382,7 @@ impl DashboardApp {
                     }
 
                     if min_error < f64::INFINITY {
-                        let point = PlotPoints::new(vec![[min_error_iter as f64, min_error.ln()]]);
+                        let point = PlotPoints::new(vec![[min_error_iter as f64, (min_error + f64::EPSILON).ln()]]);
                         point_series.push((item_name, point));
                     }
                 }
@@ -606,7 +607,6 @@ impl eframe::App for DashboardApp {
                     ui.checkbox(&mut self.show_partial_sums, "Частичные суммы");
                     ui.checkbox(&mut self.show_limits, "Пределы");
                     ui.checkbox(&mut self.show_imaginary, "Мнимые части");
-                    ui.checkbox(&mut self.show_deviation, "Отклонения");
                 });
 
                 ui.separator();
