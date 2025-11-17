@@ -1,9 +1,9 @@
 use crate::data_loader::{DataItem, DataLoader};
 use crate::filters::Filters;
+use anyhow::Result;
 use eframe::egui;
 use egui_plot::{Line, MarkerShape, Plot, PlotPoints, Points};
 use std::sync::{Arc, mpsc};
-use anyhow::Result;
 
 pub struct DashboardApp {
     loader: Arc<DataLoader>,
@@ -29,7 +29,8 @@ pub struct DashboardApp {
 
 impl DashboardApp {
     pub fn new(loader: Arc<DataLoader>) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel::<std::result::Result<Vec<DataItem>, anyhow::Error>>();
+        let (tx, rx) =
+            std::sync::mpsc::channel::<std::result::Result<Vec<DataItem>, anyhow::Error>>();
         Self {
             loader,
             filters: Filters::default(),
@@ -54,14 +55,15 @@ impl DashboardApp {
             let filters = self.filters.clone();
             let loader = self.loader.clone();
             let tx = sender.clone();
-            
+
             // Запускаем загрузку в отдельном потоке
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
-                let result: std::result::Result<Vec<DataItem>, anyhow::Error> = rt.block_on(loader.filter_data(&filters));
+                let result: std::result::Result<Vec<DataItem>, anyhow::Error> =
+                    rt.block_on(loader.filter_data(&filters));
                 let _ = tx.send(result);
             });
-            
+
             self.loading = true;
         }
     }
@@ -85,7 +87,11 @@ impl DashboardApp {
         }
     }
 
-    fn format_item_name(&self, series: &crate::data_loader::SeriesRecord, accel: &crate::data_loader::AccelInfo) -> String {
+    fn format_item_name(
+        &self,
+        series: &crate::data_loader::SeriesRecord,
+        accel: &crate::data_loader::AccelInfo,
+    ) -> String {
         let mut name = format!("{} (m={}) ", accel.name, accel.m_value);
 
         // Add accel parameters
@@ -159,10 +165,7 @@ impl DashboardApp {
 
                         lines.push(
                             Line::new(imag_partial_points)
-                                .name(format!(
-                                    "{} (частичные суммы, мнимая часть)",
-                                    series.name
-                                ))
+                                .name(format!("{} (частичные суммы, мнимая часть)", series.name))
                                 .color(egui::Color32::from_rgb(255, 192, 203)),
                         );
                     }
@@ -188,7 +191,10 @@ impl DashboardApp {
                     }
 
                     let item_name = self.format_item_name(series, &accel_record.accel_info);
-                    let has_complex = accel_record.computed.iter().any(|cn| cn.map_or(false, |c| c.imag.abs() > 1e-15));
+                    let has_complex = accel_record
+                        .computed
+                        .iter()
+                        .any(|cn| cn.map_or(false, |c| c.imag.abs() > 1e-15));
 
                     // Main convergence line - zip series computed with accel computed
                     let points: PlotPoints = series
@@ -272,11 +278,13 @@ impl DashboardApp {
                         .computed
                         .iter()
                         .zip(accel_record.computed.iter())
-                        .filter_map(|(c, accel)| accel.map(|a| {
-                            let error = (a.real - series.series_limit.real).abs() 
-                                      + (a.imag - series.series_limit.imag).abs();
-                            [c.n as f64, error.ln()] // Log scale
-                        }))
+                        .filter_map(|(c, accel)| {
+                            accel.map(|a| {
+                                let error = (a.real - series.series_limit.real).abs()
+                                    + (a.imag - series.series_limit.imag).abs();
+                                [c.n as f64, error.ln()] // Log scale
+                            })
+                        })
                         .collect();
 
                     lines.push(Line::new(points).name(item_name));
@@ -328,8 +336,8 @@ impl DashboardApp {
 
                     for (c, accel) in series.computed.iter().zip(accel_record.computed.iter()) {
                         if let Some(a) = accel {
-                            let error = (a.real - series.series_limit.real).abs() 
-                                      + (a.imag - series.series_limit.imag).abs();
+                            let error = (a.real - series.series_limit.real).abs()
+                                + (a.imag - series.series_limit.imag).abs();
 
                             if error < min_error {
                                 min_error = error;
@@ -411,43 +419,43 @@ impl eframe::App for DashboardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Проверяем наличие новых данных от фоновых потоков
         self.check_for_data();
-        
+
         // Левое меню с фильтрами
         egui::SidePanel::left("filters").show(ctx, |ui| {
             ui.heading("Фильтры");
 
-    // Точность
-    ui.push_id("precision_filters", |ui| {
-        filter_section(
-            ui,
-            "Точность",
-            &self.loader.metadata.precisions,
-            &mut self.filters.precisions,
-            &mut self.show_precision,
-        );
-    });
+            // Точность
+            ui.push_id("precision_filters", |ui| {
+                filter_section(
+                    ui,
+                    "Точность",
+                    &self.loader.metadata.precisions,
+                    &mut self.filters.precisions,
+                    &mut self.show_precision,
+                );
+            });
 
-    // Базовые ряды
-    ui.push_id("series_filters", |ui| {
-        filter_section(
-            ui,
-            "Базовые ряды",
-            &self.loader.metadata.series_names,
-            &mut self.filters.base_series,
-            &mut self.show_series,
-        );
-    });
+            // Базовые ряды
+            ui.push_id("series_filters", |ui| {
+                filter_section(
+                    ui,
+                    "Базовые ряды",
+                    &self.loader.metadata.series_names,
+                    &mut self.filters.base_series,
+                    &mut self.show_series,
+                );
+            });
 
-    // Базовые методы ускорения
-    ui.push_id("accel_filters", |ui| {
-        filter_section(
-            ui,
-            "Базовые методы ускорения",
-            &self.loader.metadata.accel_names,
-            &mut self.filters.base_accel,
-            &mut self.show_accel,
-        );
-    });
+            // Базовые методы ускорения
+            ui.push_id("accel_filters", |ui| {
+                filter_section(
+                    ui,
+                    "Базовые методы ускорения",
+                    &self.loader.metadata.accel_names,
+                    &mut self.filters.base_accel,
+                    &mut self.show_accel,
+                );
+            });
 
             // m_values
             ui.horizontal(|ui| {
@@ -508,36 +516,36 @@ impl eframe::App for DashboardApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.push_id("main_plots_scroll", |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                if self.data.is_some() {
-                    // Convergence plot
-                    if self.show_convergence {
-                        ui.push_id("convergence_plot_wrapper", |ui| {
-                            self.create_convergence_plot(ui);
-                        });
-                        ui.separator();
-                    }
+                    if self.data.is_some() {
+                        // Convergence plot
+                        if self.show_convergence {
+                            ui.push_id("convergence_plot_wrapper", |ui| {
+                                self.create_convergence_plot(ui);
+                            });
+                            ui.separator();
+                        }
 
-                    // Error plot
-                    if self.show_error {
-                        ui.push_id("error_plot_wrapper", |ui| {
-                            self.create_error_plot(ui);
-                        });
-                        ui.separator();
-                    }
+                        // Error plot
+                        if self.show_error {
+                            ui.push_id("error_plot_wrapper", |ui| {
+                                self.create_error_plot(ui);
+                            });
+                            ui.separator();
+                        }
 
-                    // Performance plot
-                    if self.show_performance {
-                        ui.push_id("performance_plot_wrapper", |ui| {
-                            self.create_performance_plot(ui);
+                        // Performance plot
+                        if self.show_performance {
+                            ui.push_id("performance_plot_wrapper", |ui| {
+                                self.create_performance_plot(ui);
+                            });
+                            ui.separator();
+                        }
+                    } else {
+                        ui.centered_and_justified(|ui| {
+                            ui.heading("Выберите фильтры и нажмите Обновить");
                         });
-                        ui.separator();
                     }
-                } else {
-                    ui.centered_and_justified(|ui| {
-                        ui.heading("Выберите фильтры и нажмите Обновить");
-                    });
-                }
-            });
+                });
             });
         });
     }

@@ -275,13 +275,15 @@ impl DataLoader {
         let precisions = Self::get_unique_strings(ctx, "series", "precision").await?;
         let series_names = Self::get_unique_strings(ctx, "series", "series_name").await?;
         let accel_names = Self::get_unique_strings(ctx, "accelerations", "accel_name").await?;
+        println!("collecting m_values");
+        let m_values = Self::get_unique_m_values(ctx).await?;
 
         Ok(Metadata {
             precisions,
             series_names,
             accel_names,
-            m_values: vec![],                  // TODO: extract from accel struct
-            accel_param_info: HashMap::new(),  // TODO: extract from struct
+            m_values,
+            accel_param_info: HashMap::new(), // TODO: extract from struct
             series_param_info: HashMap::new(), // TODO: extract from struct
         })
     }
@@ -306,6 +308,26 @@ impl DataLoader {
                     i.with_context(|| format!("Didn't expect null in {column}"))?
                         .to_string(),
                 );
+            }
+        }
+        Ok(res)
+    }
+
+    // Not null
+    async fn get_unique_m_values(ctx: &SessionContext) -> Result<Vec<i32>> {
+        let df = ctx.table("accelerations").await?;
+        let df = df.select(vec![col("m_value")])?.distinct()?;
+        let batches: Vec<RecordBatch> = df.collect().await.map_err(|e| {
+            anyhow::anyhow!("Failed to get unique m_values from accelerations: {}", e)
+        })?;
+
+        let mut res = Vec::new();
+        for batch in batches {
+            let col = batch
+                .column_by_name("m_value")
+                .context("m_value column not found")?;
+            for i in to_i64("m_value", col)? {
+                res.push(i.with_context(|| "Didn't expect null in m_value")? as i32);
             }
         }
         Ok(res)
