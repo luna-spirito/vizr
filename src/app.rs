@@ -374,8 +374,8 @@ impl DashboardApp {
     }
 }
 
-// Генерируем UI для фильтров
-fn filter_section(
+// Генерируем UI для фильтров (полноширинный layout с переносом строк)
+fn filter_section_horizontal(
     ui: &mut egui::Ui,
     title: &str,
     items: &[String],
@@ -383,7 +383,7 @@ fn filter_section(
     show_all: &mut bool,
 ) {
     ui.horizontal(|ui| {
-        ui.heading(title);
+        ui.label(format!("{}:", title));
         if ui.button("All").clicked() {
             *show_all = true;
             selected.extend(items.iter().cloned());
@@ -394,24 +394,20 @@ fn filter_section(
         }
     });
 
-    egui::ScrollArea::vertical()
-        .max_height(100.0)
-        .show(ui, |ui| {
-            ui.group(|ui| {
-                ui.style_mut().wrap = Some(true);
-                for item in items {
-                    let mut checked = selected.contains(item);
-                    if ui.checkbox(&mut checked, item).changed() {
-                        if checked {
-                            selected.insert(item.clone());
-                        } else {
-                            selected.remove(item);
-                        }
-                    }
+    // Use wrapping layout for checkboxes
+    ui.horizontal_wrapped(|ui| {
+        for item in items {
+            let mut checked = selected.contains(item);
+            if ui.checkbox(&mut checked, item).changed() {
+                if checked {
+                    selected.insert(item.clone());
+                } else {
+                    selected.remove(item);
                 }
-            });
-        });
-    ui.add_space(10.0);
+            }
+        }
+    });
+    ui.add_space(5.0);
 }
 
 impl eframe::App for DashboardApp {
@@ -419,13 +415,14 @@ impl eframe::App for DashboardApp {
         // Проверяем наличие новых данных от фоновых потоков
         self.check_for_data();
 
-        // Левое меню с фильтрами
-        egui::SidePanel::left("filters").show(ctx, |ui| {
+        // Верхняя панель с фильтрами
+        egui::TopBottomPanel::top("filters").show(ctx, |ui| {
             ui.heading("Фильтры");
+            ui.add_space(5.0);
 
             // Точность
             ui.push_id("precision_filters", |ui| {
-                filter_section(
+                filter_section_horizontal(
                     ui,
                     "Точность",
                     &self.loader.metadata.precisions,
@@ -436,7 +433,7 @@ impl eframe::App for DashboardApp {
 
             // Базовые ряды
             ui.push_id("series_filters", |ui| {
-                filter_section(
+                filter_section_horizontal(
                     ui,
                     "Базовые ряды",
                     &self.loader.metadata.series_names,
@@ -447,7 +444,7 @@ impl eframe::App for DashboardApp {
 
             // Базовые методы ускорения
             ui.push_id("accel_filters", |ui| {
-                filter_section(
+                filter_section_horizontal(
                     ui,
                     "Базовые методы ускорения",
                     &self.loader.metadata.accel_names,
@@ -457,58 +454,59 @@ impl eframe::App for DashboardApp {
             });
 
             // m_values
-            ui.horizontal(|ui| {
-                ui.heading("Значения m");
-                if ui.button("All").clicked() {
-                    self.filters.m_values.extend(&self.loader.metadata.m_values);
-                }
-                if ui.button("None").clicked() {
-                    self.filters.m_values.clear();
-                }
-            });
-            ui.push_id("m_values_scroll", |ui| {
-                egui::ScrollArea::vertical()
-                    .max_height(100.0)
-                    .show(ui, |ui| {
-                        ui.group(|ui| {
-                            for m in &self.loader.metadata.m_values {
-                                let mut checked = self.filters.m_values.contains(m);
-                                if ui.checkbox(&mut checked, format!("m={}", m)).changed() {
-                                    if checked {
-                                        self.filters.m_values.insert(*m);
-                                    } else {
-                                        self.filters.m_values.remove(m);
-                                    }
-                                }
+            ui.push_id("m_values_filters", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Значения m:");
+                    if ui.button("All").clicked() {
+                        self.filters.m_values.extend(&self.loader.metadata.m_values);
+                    }
+                    if ui.button("None").clicked() {
+                        self.filters.m_values.clear();
+                    }
+                });
+
+                // Use wrapping layout for m_values checkboxes
+                ui.horizontal_wrapped(|ui| {
+                    for m in &self.loader.metadata.m_values {
+                        let mut checked = self.filters.m_values.contains(m);
+                        if ui.checkbox(&mut checked, format!("m={}", m)).changed() {
+                            if checked {
+                                self.filters.m_values.insert(*m);
+                            } else {
+                                self.filters.m_values.remove(m);
                             }
-                        });
-                    });
+                        }
+                    }
+                });
             });
 
             ui.separator();
 
             // Plot options
-            ui.heading("Опции графиков");
-            ui.checkbox(&mut self.show_convergence, "График сходимости");
-            ui.checkbox(&mut self.show_error, "График ошибки");
-            ui.checkbox(&mut self.show_performance, "График производительности");
+            ui.horizontal(|ui| {
+                ui.label("Опции графиков:");
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut self.show_convergence, "Сходимость");
+                ui.checkbox(&mut self.show_error, "Ошибка");
+                ui.checkbox(&mut self.show_performance, "Производительность");
+                ui.separator();
+                ui.checkbox(&mut self.show_partial_sums, "Частичные суммы");
+                ui.checkbox(&mut self.show_limits, "Пределы");
+                ui.checkbox(&mut self.show_imaginary, "Мнимые части");
+            });
 
             ui.separator();
-            ui.checkbox(&mut self.show_partial_sums, "Частичные суммы");
-            ui.checkbox(&mut self.show_limits, "Пределы");
-            ui.checkbox(&mut self.show_imaginary, "Мнимые части");
 
-            ui.separator();
-
-            // Кнопка Обновить
-            if ui.button("🔄 Обновить графики").clicked() {
-                self.update_data();
-            }
-
-            // Show data count
-            if let Some(ref data) = self.data {
-                ui.label(format!("Загружено записей: {}", data.len()));
-            }
+            // Кнопка Обновить и счетчик данных
+            ui.horizontal(|ui| {
+                if ui.button("🔄 Обновить графики").clicked() {
+                    self.update_data();
+                }
+                if let Some(ref data) = self.data {
+                    ui.label(format!("Загружено записей: {}", data.len()));
+                }
+            });
         });
 
         // Центральная область с графиками
