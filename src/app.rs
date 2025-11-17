@@ -8,14 +8,8 @@ pub struct DashboardApp {
     loader: Arc<DataLoader>,
     filters: Filters,
     data: Option<Vec<DataItem>>,
-    // UI состояние
-    show_precision: bool,
-    show_series: bool,
-    show_accel: bool,
-    // Collapsible section states
-    convergence_open: bool,
-    error_open: bool,
-    performance_open: bool,
+
+
     // Plot options
     show_partial_sums: bool,
     show_limits: bool,
@@ -34,12 +28,7 @@ impl DashboardApp {
             loader,
             filters: Filters::default(),
             data: None,
-            show_precision: true,
-            show_series: true,
-            show_accel: true,
-            convergence_open: true,
-            error_open: true,
-            performance_open: true,
+
             show_partial_sums: true,
             show_limits: true,
             show_imaginary: true,
@@ -491,23 +480,25 @@ impl eframe::App for DashboardApp {
 
                 // Точность
                 ui.push_id("precision_filters", |ui| {
+                    let mut show_all = self.filters.precisions.len() == self.loader.metadata.precisions.len();
                     filter_section_horizontal(
                         ui,
                         "Точность",
                         &self.loader.metadata.precisions,
                         &mut self.filters.precisions,
-                        &mut self.show_precision,
+                        &mut show_all,
                     );
                 });
 
                 // Базовые ряды
                 ui.push_id("series_filters", |ui| {
+                    let mut show_all = self.filters.base_series.len() == self.loader.metadata.series_names.len();
                     filter_section_horizontal(
                         ui,
                         "Базовые ряды",
                         &self.loader.metadata.series_names,
                         &mut self.filters.base_series,
-                        &mut self.show_series,
+                        &mut show_all,
                     );
                 });
 
@@ -523,12 +514,13 @@ impl eframe::App for DashboardApp {
 
                 // Базовые методы ускорения
                 ui.push_id("accel_filters", |ui| {
+                    let mut show_all = self.filters.base_accel.len() == self.loader.metadata.accel_names.len();
                     filter_section_horizontal(
                         ui,
                         "Базовые методы ускорения",
                         &self.loader.metadata.accel_names,
                         &mut self.filters.base_accel,
-                        &mut self.show_accel,
+                        &mut show_all,
                     );
                 });
 
