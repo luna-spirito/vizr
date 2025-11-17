@@ -500,8 +500,13 @@ impl eframe::App for DashboardApp {
 
             // Кнопка Обновить и счетчик данных
             ui.horizontal(|ui| {
-                if ui.button("🔄 Обновить графики").clicked() {
-                    self.update_data();
+                if self.loading {
+                    ui.spinner();
+                    ui.label("Загрузка...");
+                } else {
+                    if ui.button("🔄 Обновить графики").clicked() {
+                        self.update_data();
+                    }
                 }
                 if let Some(ref data) = self.data {
                     ui.label(format!("Загружено записей: {}", data.len()));
@@ -537,6 +542,14 @@ impl eframe::App for DashboardApp {
                             });
                             ui.separator();
                         }
+                    } else if self.loading {
+                        ui.centered_and_justified(|ui| {
+                            ui.add_space(50.0);
+                            ui.spinner();
+                            ui.add_space(20.0);
+                            ui.heading("Загрузка данных...");
+                            ui.label("Пожалуйста, подождите пока фильтры применяются к данным");
+                        });
                     } else {
                         ui.centered_and_justified(|ui| {
                             ui.heading("Выберите фильтры и нажмите Обновить");
