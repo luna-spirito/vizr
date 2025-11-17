@@ -1,4 +1,3 @@
-use crate::filters::Filters;
 use anyhow::{Context, Result, anyhow};
 use datafusion::arrow::array::*;
 
@@ -11,9 +10,18 @@ use datafusion::logical_expr::{col, lit};
 use datafusion::prelude::*;
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::iter;
 
+#[derive(Default, Clone)]
+pub struct Filters {
+    pub precisions: HashSet<String>,
+    pub base_series: HashSet<String>,
+    pub base_accel: HashSet<String>,
+    pub m_values: HashSet<i32>,
+    pub accel_params: HashMap<String, HashSet<String>>,
+    pub series_params: HashMap<String, HashSet<String>>,
+}
 // Core
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct ComplexNumber {

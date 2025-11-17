@@ -1,5 +1,4 @@
-use crate::data_loader::{DataItem, DataLoader};
-use crate::filters::Filters;
+use crate::data_loader::{DataItem, DataLoader, Filters};
 use anyhow::Result;
 use eframe::egui;
 use egui_plot::{Line, MarkerShape, Plot, PlotPoints, Points};
