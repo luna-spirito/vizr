@@ -128,6 +128,16 @@ impl DashboardApp {
             let mut lines = Vec::new();
             let mut series_names = std::collections::HashSet::new();
             let mut limit_lines = Vec::new();
+            
+            // Calculate Y range based on series limits
+            let mut min_limit = f64::INFINITY;
+            let mut max_limit = f64::NEG_INFINITY;
+            for (series, _) in data {
+                if !series.computed.is_empty() {
+                    min_limit = min_limit.min(series.series_limit.real - 10.0);
+                    max_limit = max_limit.max(series.series_limit.real + 10.0);
+                }
+            }
 
             for (series, accel_records) in data {
                 if series.computed.is_empty() {
@@ -231,17 +241,25 @@ impl DashboardApp {
                 );
             }
 
-            Plot::new("convergence")
+            let mut plot = Plot::new("convergence")
                 .allow_zoom(true)
                 .allow_drag(true)
                 .height(600.0)
                 .x_axis_label("Итерация n")
-                .y_axis_label("Значение")
-                .show(ui, |plot_ui| {
-                    for line in lines {
-                        plot_ui.line(line);
-                    }
-                });
+                .y_axis_label("Значение");
+            
+            // Set default Y range if we have valid limits
+            if min_limit != f64::INFINITY && max_limit != f64::NEG_INFINITY {
+                plot = plot.auto_bounds(egui::Vec2b::new(false, true)) // Disable auto bounds for Y
+                    .include_y(min_limit)
+                    .include_y(max_limit);
+            }
+            
+            plot.show(ui, |plot_ui| {
+                for line in lines {
+                    plot_ui.line(line);
+                }
+            });
         } else {
             ui.label("Нет данных для отображения");
         }
