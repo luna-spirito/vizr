@@ -12,10 +12,10 @@ pub struct DashboardApp {
     show_precision: bool,
     show_series: bool,
     show_accel: bool,
-    // Plot visibility toggles
-    show_convergence: bool,
-    show_error: bool,
-    show_performance: bool,
+    // Collapsible section states
+    convergence_open: bool,
+    error_open: bool,
+    performance_open: bool,
     // Plot options
     show_partial_sums: bool,
     show_limits: bool,
@@ -37,9 +37,9 @@ impl DashboardApp {
             show_precision: true,
             show_series: true,
             show_accel: true,
-            show_convergence: true,
-            show_error: true,
-            show_performance: true,
+            convergence_open: true,
+            error_open: true,
+            performance_open: true,
             show_partial_sums: true,
             show_limits: true,
             show_imaginary: true,
@@ -119,7 +119,6 @@ impl DashboardApp {
     }
 
     fn create_convergence_plot(&self, ui: &mut egui::Ui) {
-        ui.heading("Сходимость методов");
 
         if let Some(ref data) = self.data {
             if data.is_empty() {
@@ -250,7 +249,6 @@ impl DashboardApp {
     }
 
     fn create_error_plot(&self, ui: &mut egui::Ui) {
-        ui.heading("Ошибка сходимости");
 
         if let Some(ref data) = self.data {
             if data.is_empty() {
@@ -307,7 +305,6 @@ impl DashboardApp {
     }
 
     fn create_performance_plot(&self, ui: &mut egui::Ui) {
-        ui.heading("Производительность методов");
 
         if let Some(ref data) = self.data {
             if data.is_empty() {
@@ -487,10 +484,7 @@ impl eframe::App for DashboardApp {
                 ui.label("Опции графиков:");
             });
             ui.horizontal_wrapped(|ui| {
-                ui.checkbox(&mut self.show_convergence, "Сходимость");
-                ui.checkbox(&mut self.show_error, "Ошибка");
-                ui.checkbox(&mut self.show_performance, "Производительность");
-                ui.separator();
+                ui.label("Опции графиков:");
                 ui.checkbox(&mut self.show_partial_sums, "Частичные суммы");
                 ui.checkbox(&mut self.show_limits, "Пределы");
                 ui.checkbox(&mut self.show_imaginary, "Мнимые части");
@@ -520,28 +514,19 @@ impl eframe::App for DashboardApp {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     if self.data.is_some() {
                         // Convergence plot
-                        if self.show_convergence {
-                            ui.push_id("convergence_plot_wrapper", |ui| {
-                                self.create_convergence_plot(ui);
-                            });
-                            ui.separator();
-                        }
+                        ui.collapsing("Сходимость методов", |ui| {
+                            self.create_convergence_plot(ui);
+                        });
 
                         // Error plot
-                        if self.show_error {
-                            ui.push_id("error_plot_wrapper", |ui| {
-                                self.create_error_plot(ui);
-                            });
-                            ui.separator();
-                        }
+                        ui.collapsing("Ошибка сходимости", |ui| {
+                            self.create_error_plot(ui);
+                        });
 
                         // Performance plot
-                        if self.show_performance {
-                            ui.push_id("performance_plot_wrapper", |ui| {
-                                self.create_performance_plot(ui);
-                            });
-                            ui.separator();
-                        }
+                        ui.collapsing("Производительность методов", |ui| {
+                            self.create_performance_plot(ui);
+                        });
                     } else if self.loading {
                         ui.centered_and_justified(|ui| {
                             ui.add_space(50.0);
