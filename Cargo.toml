@@ -3,6 +3,10 @@ name = "vizr"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+perf_tracing = []
+
 # [profile.release]
 # lto = "fat"
 # opt-level = 3

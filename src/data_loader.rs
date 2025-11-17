@@ -12,6 +12,74 @@ use datafusion::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::iter;
+#[cfg(feature = "perf_tracing")]
+use std::sync::Mutex;
+use std::time::Instant;
+
+// Global timing tracking (only enabled with perf_tracing feature)
+#[cfg(feature = "perf_tracing")]
+static TIMING_STATS: std::sync::LazyLock<Mutex<TimingStats>> =
+    std::sync::LazyLock::new(|| Mutex::new(TimingStats::new()));
+
+#[cfg(feature = "perf_tracing")]
+#[derive(Default)]
+struct TimingStats {
+    series_query_time: std::time::Duration,
+    series_processing_time: std::time::Duration,
+    accelerations_query_time: std::time::Duration,
+    accelerations_processing_time: std::time::Duration,
+    accelerations_table_access_time: std::time::Duration,
+    accelerations_filtering_time: std::time::Duration,
+    accelerations_collect_time: std::time::Duration,
+    metadata_query_time: std::time::Duration,
+    metadata_processing_time: std::time::Duration,
+    total_filter_data_time: std::time::Duration,
+    series_count: usize,
+    accel_count: usize,
+}
+
+#[cfg(feature = "perf_tracing")]
+impl TimingStats {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn print_summary(&self) {
+        println!("=== Performance Summary ===");
+        println!("Total filter_data time: {:?}", self.total_filter_data_time);
+        println!("Series query time: {:?}", self.series_query_time);
+        println!("Series processing time: {:?}", self.series_processing_time);
+        println!(
+            "Accelerations query time: {:?}",
+            self.accelerations_query_time
+        );
+        println!(
+            "  - Table access time: {:?}",
+            self.accelerations_table_access_time
+        );
+        println!(
+            "  - Filtering time: {:?}",
+            self.accelerations_filtering_time
+        );
+        println!("  - Collect time: {:?}", self.accelerations_collect_time);
+        println!(
+            "Accelerations processing time: {:?}",
+            self.accelerations_processing_time
+        );
+        println!("Metadata query time: {:?}", self.metadata_query_time);
+        println!(
+            "Metadata processing time: {:?}",
+            self.metadata_processing_time
+        );
+        println!("Series count: {}", self.series_count);
+        println!("Acceleration records processed: {}", self.accel_count);
+        println!("============================");
+    }
+}
 
 #[derive(Default, Clone)]
 pub struct Filters {
@@ -302,12 +370,15 @@ impl DataLoader {
         table: &str,
         column: &str,
     ) -> Result<Vec<String>> {
+        let query_start = Instant::now();
         let df = ctx.table(table).await?;
         let df = df.select(vec![col(column)])?.distinct()?;
         let batches: Vec<RecordBatch> = df.collect().await.map_err(|e| {
             anyhow::anyhow!("Failed to get unique {} from {}: {}", column, table, e)
         })?;
+        let query_time = query_start.elapsed();
 
+        let processing_start = Instant::now();
         let mut res = Vec::new();
         for batch in batches {
             let col = batch.column_by_name(column).context("column not found")?;
@@ -318,17 +389,29 @@ impl DataLoader {
                 );
             }
         }
+        let processing_time = processing_start.elapsed();
+
+        // Update global stats
+        #[cfg(feature = "perf_tracing")]
+        if let Ok(mut stats) = TIMING_STATS.lock() {
+            stats.metadata_query_time += query_time;
+            stats.metadata_processing_time += processing_time;
+        }
+
         Ok(res)
     }
 
     // Not null
     async fn get_unique_m_values(ctx: &SessionContext) -> Result<Vec<i32>> {
+        let query_start = Instant::now();
         let df = ctx.table("accelerations").await?;
         let df = df.select(vec![col("m_value")])?.distinct()?;
         let batches: Vec<RecordBatch> = df.collect().await.map_err(|e| {
             anyhow::anyhow!("Failed to get unique m_values from accelerations: {}", e)
         })?;
+        let query_time = query_start.elapsed();
 
+        let processing_start = Instant::now();
         let mut res = Vec::new();
         for batch in batches {
             let col = batch
@@ -338,6 +421,15 @@ impl DataLoader {
                 res.push(i.with_context(|| "Didn't expect null in m_value")? as i32);
             }
         }
+        let processing_time = processing_start.elapsed();
+
+        // Update global stats
+        #[cfg(feature = "perf_tracing")]
+        if let Ok(mut stats) = TIMING_STATS.lock() {
+            stats.metadata_query_time += query_time;
+            stats.metadata_processing_time += processing_time;
+        }
+
         Ok(res)
     }
 
@@ -346,9 +438,12 @@ impl DataLoader {
         series_id: i32,
         filters: &Filters,
     ) -> Result<Vec<AccelRecord>> {
+        let table_start = Instant::now();
         let mut df = self.ctx.table("accelerations").await?;
+        let table_time = table_start.elapsed();
 
         // Filter by series_id
+        let filter_start = Instant::now();
         df = df.filter(col("series_id").eq(lit(series_id)))?;
 
         // Apply accel filters
@@ -368,12 +463,16 @@ impl DataLoader {
             }
             df = df.filter(filter_expr)?;
         }
+        let filter_time = filter_start.elapsed();
 
+        let collect_start = Instant::now();
         let batches: Vec<RecordBatch> = df
             .collect()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to execute accelerations query: {}", e))?;
+        let collect_time = collect_start.elapsed();
 
+        let processing_start = Instant::now();
         let mut accel_records = Vec::new();
         for batch in batches {
             let accel_name = to_str(
@@ -420,6 +519,18 @@ impl DataLoader {
                 });
             }
         }
+        let processing_time = processing_start.elapsed();
+
+        // Update global stats
+        #[cfg(feature = "perf_tracing")]
+        if let Ok(mut stats) = TIMING_STATS.lock() {
+            stats.accelerations_query_time += table_time + filter_time + collect_time;
+            stats.accelerations_table_access_time += table_time;
+            stats.accelerations_filtering_time += filter_time;
+            stats.accelerations_collect_time += collect_time;
+            stats.accelerations_processing_time += processing_time;
+            stats.accel_count += accel_records.len();
+        }
 
         Ok(accel_records)
     }
@@ -428,6 +539,13 @@ impl DataLoader {
         &self,
         filters: &Filters,
     ) -> Result<Vec<(SeriesRecord, Vec<AccelRecord>)>> {
+        // Reset global timing stats
+        #[cfg(feature = "perf_tracing")]
+        if let Ok(mut stats) = TIMING_STATS.lock() {
+            stats.reset();
+        }
+
+        let total_start = Instant::now();
         let mut df = self.ctx.table("series").await?;
 
         // Apply series filters
@@ -449,8 +567,11 @@ impl DataLoader {
             df = df.filter(filter_expr)?;
         }
 
+        let query_start = Instant::now();
         let batches: Vec<RecordBatch> = df.collect().await?;
+        let query_time = query_start.elapsed();
 
+        let processing_start = Instant::now();
         let mut result = Vec::new();
         for batch in batches {
             let series_id = to_i64(
@@ -515,6 +636,19 @@ impl DataLoader {
                 ));
             }
         }
+        let processing_time = processing_start.elapsed();
+        let total_time = total_start.elapsed();
+
+        // Update global stats and print summary
+        #[cfg(feature = "perf_tracing")]
+        if let Ok(mut stats) = TIMING_STATS.lock() {
+            stats.series_query_time += query_time;
+            stats.series_processing_time += processing_time;
+            stats.series_count = result.len();
+            stats.total_filter_data_time = total_time;
+            stats.print_summary();
+        }
+
         println!("filtering complete");
         Ok(result)
     }

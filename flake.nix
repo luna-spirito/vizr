@@ -21,7 +21,7 @@
       devShells.default = pkgs.mkShell {
         buildInputs = [
           fenix.packages.${system}.latest.toolchain
-        ] ++ (with pkgs.python3Packages; [
+        ] ++ [ pkgs.perf ] ++ (with pkgs.python3Packages; [
           numpy
           pandas
           parquet

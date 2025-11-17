@@ -119,7 +119,6 @@ impl DashboardApp {
     }
 
     fn create_convergence_plot(&self, ui: &mut egui::Ui) {
-
         if let Some(ref data) = self.data {
             if data.is_empty() {
                 ui.label("Нет данных для отображения");
@@ -249,7 +248,6 @@ impl DashboardApp {
     }
 
     fn create_error_plot(&self, ui: &mut egui::Ui) {
-
         if let Some(ref data) = self.data {
             if data.is_empty() {
                 ui.label("Нет данных для отображения");
@@ -305,7 +303,6 @@ impl DashboardApp {
     }
 
     fn create_performance_plot(&self, ui: &mut egui::Ui) {
-
         if let Some(ref data) = self.data {
             if data.is_empty() {
                 ui.label("Нет данных для отображения");
