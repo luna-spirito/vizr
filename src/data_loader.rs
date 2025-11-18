@@ -1,3 +1,4 @@
+use crate::symlog::Scientific;
 use anyhow::{Context, Result, anyhow};
 use datafusion::{
     arrow::{
@@ -132,12 +133,7 @@ pub struct Point {
     pub value: ComplexNumber,
 }
 
-// Parse logarithmic value from string, exploiting scientific notation when possible
-fn parse_logarithmic_value(s: &str) -> Result<f64> {
-    if s.is_empty() {
-        return Ok(f64::NEG_INFINITY);
-    }
-
+fn parse_scientific(s: &str) -> Result<Scientific> {
     // Check for scientific notation (e or E)
     if let Some(e_pos) = s.find(['e', 'E']) {
         let mantissa_str = &s[..e_pos];
@@ -151,23 +147,14 @@ fn parse_logarithmic_value(s: &str) -> Result<f64> {
             .parse()
             .with_context(|| format!("Failed to parse exponent: {}", exponent_str))?;
 
-        // For scientific notation: log10(mantissa * 10^exponent) = log10(mantissa) + exponent
-        if mantissa <= 0.0 {
-            return Ok(f64::NEG_INFINITY);
-        }
-
-        Ok(mantissa.log10() + exponent as f64)
+        Ok(Scientific(mantissa, exponent))
     } else {
         // Regular number - parse and compute log10
         let value: f64 = s
             .parse()
             .with_context(|| format!("Failed to parse number: {}", s))?;
 
-        if value <= 0.0 {
-            return Ok(f64::NEG_INFINITY);
-        }
-
-        Ok(value.log10())
+        Ok(Scientific(value, 0))
     }
 }
 
@@ -342,7 +329,11 @@ fn to_point<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<Point>> {
     ))
 }
 
-fn to_accel_point<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<Option<AccelPoint>>> {
+fn to_accel_point<'a>(
+    name: &str,
+    v: &'a dyn Array,
+    symlog: bool,
+) -> Result<Vec<Option<AccelPoint>>> {
     if let Some(v) = v.as_struct_opt() {
         if let (Some(value), Some(deviation)) =
             (v.column_by_name("value"), v.column_by_name("deviation"))
@@ -354,10 +345,15 @@ fn to_accel_point<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<Option<AccelPo
                         None
                     } else {
                         let deviation_str = deviation.context("no deviation in accel point")?;
-                        let log_deviation = parse_logarithmic_value(deviation_str)?;
+                        let deviation = parse_scientific(deviation_str)?;
+                        let deviation = if symlog {
+                            deviation.symlog()
+                        } else {
+                            deviation.approx_f64()
+                        };
                         Some(AccelPoint {
                             value: value.context("no value in accel point")?,
-                            deviation: log_deviation,
+                            deviation,
                         })
                     });
                 }
@@ -589,6 +585,7 @@ impl DataLoader {
         &self,
         series_ids: &[i32],
         filters: &Filters,
+        symlog: bool,
     ) -> Result<HashMap<i32, Vec<AccelRecord>>> {
         #[cfg(feature = "perf_tracing")]
         let table_start = Instant::now();
@@ -680,7 +677,7 @@ impl DataLoader {
                 batch
                     .column_by_name("computed")
                     .context("No computed in accelerations")?,
-                |x| to_accel_point("computed.[]", x),
+                |x| to_accel_point("computed.[]", x, symlog),
             )?;
 
             for ((((series_id, accel_name), m_value), additional_args), computed) in series_id
@@ -728,6 +725,7 @@ impl DataLoader {
     pub async fn filter_data(
         &self,
         filters: &Filters,
+        symlog: bool,
     ) -> Result<Vec<(SeriesRecord, Vec<AccelRecord>)>> {
         // Reset global timing stats
         #[cfg(feature = "perf_tracing")]
@@ -845,7 +843,7 @@ impl DataLoader {
 
         // Load all accelerations for all series in a single query
         let accelerations_map = if !series_ids.is_empty() {
-            self.load_accelerations_for_multiple_series(&series_ids, filters)
+            self.load_accelerations_for_multiple_series(&series_ids, filters, symlog)
                 .await?
         } else {
             HashMap::new()

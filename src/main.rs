@@ -1,5 +1,6 @@
 mod app;
 mod data_loader;
+mod symlog;
 
 use clap::Parser;
 use std::sync::Arc;

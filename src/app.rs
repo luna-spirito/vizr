@@ -1,9 +1,12 @@
 use crate::data_loader::{AccelRecord, DataItem, DataLoader, Filters, SeriesRecord};
+use crate::symlog::symlog_formatter;
 use anyhow::Result;
 use eframe::egui;
 use egui_plot::{Line, MarkerShape, Plot, PlotPoints, Points};
 use std::collections::HashMap;
 use std::sync::{Arc, mpsc};
+
+// TODO: Current `symlog` flag implementation is absolutely awful. To be fixed.
 
 type DataItemRef<'a> = (&'a SeriesRecord, Vec<&'a AccelRecord>);
 
@@ -178,11 +181,11 @@ impl Viz {
     ) -> Result<()> {
         let rect = egui::Rect {
             min: egui::Pos2 {
-                x: rect.min.x - 20.0,
+                x: rect.min.x - 50.0,
                 y: rect.min.y - 20.0,
             },
             max: egui::Pos2 {
-                x: rect.max.x - 20.0,
+                x: rect.max.x + 50.0,
                 y: rect.max.y + 20.0,
             },
         };
@@ -405,15 +408,13 @@ impl Viz {
         });
     }
 
-    fn create_error_plot(&mut self, ui: &mut egui::Ui, data: &[DataItemRef]) {
+    fn create_error_plot(&mut self, ui: &mut egui::Ui, data: &[DataItemRef], symlog: bool) {
         if data.is_empty() {
             ui.label("Нет данных для отображения");
             return;
         }
 
         let mut lines = Vec::new();
-        let mut min_x = f64::INFINITY;
-        let mut max_x = f64::NEG_INFINITY;
 
         for (series, accel_records) in data.iter() {
             if series.computed.is_empty() {
@@ -432,42 +433,28 @@ impl Viz {
                     .computed
                     .iter()
                     .zip(accel_record.computed.iter())
-                    .filter_map(|(c, accel)| {
-                        accel.map(|ap| {
-                            let error = ap.deviation.max(-1000.0); // Clamp to -1000
-                            min_x = min_x.min(c.n as f64);
-                            max_x = max_x.max(c.n as f64);
-                            [c.n as f64, error]
-                        })
-                    })
+                    .filter_map(|(c, accel)| Some([c.n as f64, accel.as_ref()?.deviation]))
                     .collect();
 
                 lines.push(Line::new(points).name(item_name));
             }
         }
 
-        let plot = Plot::new("error")
+        let mut plot = Plot::new("error")
             .allow_zoom(true)
             .allow_drag(true)
             .height(900.0)
             .x_axis_label("Итерация n")
             .y_axis_label("Абсолютная ошибка (log)")
-            .legend(egui_plot::Legend::default())
-            .show(ui, |plot_ui| {
-                // Add horizontal line at -1000 with tooltip
-                if min_x != f64::INFINITY && max_x != f64::NEG_INFINITY {
-                    let zero_line =
-                        Line::new(PlotPoints::new(vec![[min_x, -1000.0], [max_x, -1000.0]]))
-                            .name("≈ 0")
-                            .color(egui::Color32::from_rgb(255, 0, 0))
-                            .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 0, 0)));
-                    plot_ui.line(zero_line);
-                }
-
-                for line in lines {
-                    plot_ui.line(line);
-                }
-            });
+            .legend(egui_plot::Legend::default());
+        if symlog {
+            plot = plot.y_axis_formatter(|mark, _, _| symlog_formatter(mark.value));
+        }
+        let plot = plot.show(ui, |plot_ui| {
+            for line in lines {
+                plot_ui.line(line);
+            }
+        });
         self.plot_hovered |= plot.response.hovered();
         ui.horizontal(|ui| {
             if ui.button("📸 Снимок экрана").clicked() {
@@ -476,7 +463,7 @@ impl Viz {
         });
     }
 
-    fn create_performance_plot(&mut self, ui: &mut egui::Ui, data: &[DataItemRef]) {
+    fn create_performance_plot(&mut self, ui: &mut egui::Ui, data: &[DataItemRef], symlog: bool) {
         if data.is_empty() {
             ui.label("Нет данных для отображения");
             return;
@@ -504,7 +491,7 @@ impl Viz {
 
                 for (c, accel) in series.computed.iter().zip(accel_record.computed.iter()) {
                     if let Some(ap) = accel {
-                        let error = ap.deviation; // Already logarithmic
+                        let error = ap.deviation;
 
                         if error < min_error {
                             min_error = error;
@@ -523,33 +510,26 @@ impl Viz {
             }
         }
 
-        let plot = Plot::new("performance")
+        let mut plot = Plot::new("performance")
             .allow_zoom(true)
             .allow_drag(true)
             .height(900.0)
             .x_axis_label("Итерация достижения минимальной ошибки")
-            .y_axis_label("Минимальная ошибка (log)")
-            .legend(egui_plot::Legend::default())
-            .show(ui, |plot_ui| {
-                // Add horizontal line at -1000 with tooltip
-                if min_x != f64::INFINITY && max_x != f64::NEG_INFINITY {
-                    let zero_line =
-                        Line::new(PlotPoints::new(vec![[min_x, -1000.0], [max_x, -1000.0]]))
-                            .name("≈ 0")
-                            .color(egui::Color32::from_rgb(255, 0, 0))
-                            .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 0, 0)));
-                    plot_ui.line(zero_line);
-                }
-
-                for (name, points) in point_series {
-                    plot_ui.points(
-                        Points::new(points)
-                            .name(name)
-                            .shape(MarkerShape::Circle)
-                            .radius(4.0),
-                    );
-                }
-            });
+            .y_axis_label("Минимальная ошибка")
+            .legend(egui_plot::Legend::default());
+        if symlog {
+            plot = plot.y_axis_formatter(|mark, _, _| symlog_formatter(mark.value));
+        }
+        let plot = plot.show(ui, |plot_ui| {
+            for (name, points) in point_series {
+                plot_ui.points(
+                    Points::new(points)
+                        .name(name)
+                        .shape(MarkerShape::Circle)
+                        .radius(4.0),
+                );
+            }
+        });
         self.plot_hovered |= plot.response.hovered();
         ui.horizontal(|ui| {
             if ui.button("📸 Снимок экрана").clicked() {
@@ -562,10 +542,11 @@ impl Viz {
 pub struct DashboardApp {
     loader: Arc<DataLoader>,
     filters: Filters,
-    data: Option<(Vec<DataItem>, Filters, Filters)>,
+    data: Option<((Vec<DataItem>, bool), Filters, Filters)>,
     // Каналы для асинхронной загрузки данных
-    data_sender: Option<mpsc::Sender<Result<Vec<DataItem>>>>,
-    data_receiver: Option<mpsc::Receiver<Result<Vec<DataItem>>>>,
+    data_sender: Option<mpsc::Sender<(Result<Vec<DataItem>>, bool)>>,
+    data_receiver: Option<mpsc::Receiver<(Result<Vec<DataItem>>, bool)>>,
+    symlog: bool,
     loading: bool,
     viz: Viz,
 }
@@ -573,13 +554,14 @@ pub struct DashboardApp {
 impl DashboardApp {
     pub fn new(loader: Arc<DataLoader>) -> Self {
         let (tx, rx) =
-            std::sync::mpsc::channel::<std::result::Result<Vec<DataItem>, anyhow::Error>>();
+            std::sync::mpsc::channel::<(std::result::Result<Vec<DataItem>, anyhow::Error>, bool)>();
         Self {
             loader,
             filters: Filters::default(),
             data: None,
             data_sender: Some(tx),
             data_receiver: Some(rx),
+            symlog: true,
             loading: false,
             viz: Viz {
                 show_partial_sums: true,
@@ -595,14 +577,15 @@ impl DashboardApp {
         if let (Some(sender), _) = (&self.data_sender, &self.data_receiver) {
             let filters = self.filters.clone();
             let loader = self.loader.clone();
+            let symlog = self.symlog;
             let tx = sender.clone();
 
             // Запускаем загрузку в отдельном потоке
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 let result: std::result::Result<Vec<DataItem>, anyhow::Error> =
-                    rt.block_on(loader.filter_data(&filters));
-                let _ = tx.send(result);
+                    rt.block_on(loader.filter_data(&filters, symlog));
+                let _ = tx.send((result, symlog));
             });
 
             self.loading = true;
@@ -611,12 +594,12 @@ impl DashboardApp {
 
     fn check_for_data(&mut self) {
         if let Some(receiver) = &self.data_receiver {
-            if let Ok(result) = receiver.try_recv() {
+            if let Ok((result, symlog)) = receiver.try_recv() {
                 match result {
                     Ok(data) => {
                         let len = data.len();
                         let dynamic_filters = filterable(&data);
-                        self.data = Some((data, dynamic_filters, Filters::default()));
+                        self.data = Some(((data, symlog), dynamic_filters, Filters::default()));
                         println!("Loaded {} items after filtering", len);
                     }
                     Err(e) => {
@@ -1061,6 +1044,7 @@ impl eframe::App for DashboardApp {
                         &mut self.filters.accel_params,
                     );
                 });
+                ui.checkbox(&mut self.symlog, "Symlog");
 
                 ui.separator();
 
@@ -1088,14 +1072,14 @@ impl eframe::App for DashboardApp {
                         }
                     }
                     if let Some((ref data, _, _)) = self.data {
-                        ui.label(format!("Загружено записей: {}", data.len()));
+                        ui.label(format!("Загружено рядов: {}", data.0.len()));
                     }
                 });
 
                 ui.add_space(20.0);
 
                 // Графики
-                if let Some((data, available_dynamic_filters, selected_dynamic_filters)) =
+                if let Some(((data, symlog), available_dynamic_filters, selected_dynamic_filters)) =
                     &mut self.data
                 {
                     // Dynamic filters section
@@ -1115,12 +1099,12 @@ impl eframe::App for DashboardApp {
 
                     // Error plot
                     ui.collapsing("Ошибка сходимости", |ui| {
-                        self.viz.create_error_plot(ui, &data);
+                        self.viz.create_error_plot(ui, &data, *symlog);
                     });
 
                     // Performance plot
                     ui.collapsing("Производительность методов", |ui| {
-                        self.viz.create_performance_plot(ui, &data);
+                        self.viz.create_performance_plot(ui, &data, *symlog);
                     });
                 } else if self.loading {
                     ui.centered_and_justified(|ui| {
