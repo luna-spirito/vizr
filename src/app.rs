@@ -405,6 +405,8 @@ impl DashboardApp {
             }
 
             let mut lines = Vec::new();
+            let mut min_x = f64::INFINITY;
+            let mut max_x = f64::NEG_INFINITY;
 
             for (series, accel_records) in data {
                 if series.computed.is_empty() {
@@ -418,15 +420,17 @@ impl DashboardApp {
 
                     let item_name = self.format_item_name(series, &accel_record.accel_info);
 
-                    // Use Euclidean metric with machine epsilon for log scale
+                    // Use Euclidean metric with machine epsilon for log scale, clamp to -1000
                     let points: PlotPoints = series
                         .computed
                         .iter()
                         .zip(accel_record.computed.iter())
                         .filter_map(|(c, accel)| {
                             accel.map(|ap| {
-                                let error = ap.deviation; // Already logarithmic
-                                [c.n as f64, error] // Direct use of logarithmic value
+                                let error = ap.deviation.max(-1000.0); // Clamp to -1000
+                                min_x = min_x.min(c.n as f64);
+                                max_x = max_x.max(c.n as f64);
+                                [c.n as f64, error]
                             })
                         })
                         .collect();
@@ -442,6 +446,15 @@ impl DashboardApp {
                 .x_axis_label("Итерация n")
                 .y_axis_label("Абсолютная ошибка (log)")
                 .show(ui, |plot_ui| {
+                    // Add horizontal line at -1000 with tooltip
+                    if min_x != f64::INFINITY && max_x != f64::NEG_INFINITY {
+                        let zero_line = Line::new(PlotPoints::new(vec![[min_x, -1000.0], [max_x, -1000.0]]))
+                            .name("≈ 0")
+                            .color(egui::Color32::from_rgb(255, 0, 0))
+                            .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 0, 0)));
+                        plot_ui.line(zero_line);
+                    }
+
                     for line in lines {
                         plot_ui.line(line);
                     }
@@ -465,6 +478,8 @@ impl DashboardApp {
             }
 
             let mut point_series = Vec::new();
+            let mut min_x = f64::INFINITY;
+            let mut max_x = f64::NEG_INFINITY;
 
             for (series, accel_records) in data {
                 if series.computed.is_empty() {
@@ -494,9 +509,12 @@ impl DashboardApp {
                     }
 
                     if min_error < f64::INFINITY {
+                        let clamped_error = min_error.max(-1000.0); // Clamp to -1000
+                        min_x = min_x.min(min_error_iter as f64);
+                        max_x = max_x.max(min_error_iter as f64);
                         let point = PlotPoints::new(vec![[
                             min_error_iter as f64,
-                            min_error, // Already logarithmic
+                            clamped_error,
                         ]]);
                         point_series.push((item_name, point));
                     }
@@ -510,6 +528,15 @@ impl DashboardApp {
                 .x_axis_label("Итерация достижения минимальной ошибки")
                 .y_axis_label("Минимальная ошибка (log)")
                 .show(ui, |plot_ui| {
+                    // Add horizontal line at -1000 with tooltip
+                    if min_x != f64::INFINITY && max_x != f64::NEG_INFINITY {
+                        let zero_line = Line::new(PlotPoints::new(vec![[min_x, -1000.0], [max_x, -1000.0]]))
+                            .name("≈ 0")
+                            .color(egui::Color32::from_rgb(255, 0, 0))
+                            .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 0, 0)));
+                        plot_ui.line(zero_line);
+                    }
+
                     for (name, points) in point_series {
                         plot_ui.points(
                             Points::new(points)
