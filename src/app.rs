@@ -1,24 +1,85 @@
-use crate::data_loader::{DataItem, DataLoader, Filters};
+use crate::data_loader::{AccelRecord, DataItem, DataLoader, Filters, SeriesRecord};
 use anyhow::Result;
 use eframe::egui;
 use egui_plot::{Line, MarkerShape, Plot, PlotPoints, Points};
 use std::collections::HashMap;
 use std::sync::{Arc, mpsc};
 
-pub struct DashboardApp {
-    loader: Arc<DataLoader>,
-    filters: Filters,
-    data: Option<Vec<DataItem>>,
+type DataItemRef<'a> = (&'a SeriesRecord, Vec<&'a AccelRecord>);
 
+fn filterable(entries: &[DataItem]) -> Filters {
+    let mut precisions = std::collections::HashSet::new();
+    let mut base_series = std::collections::HashSet::new();
+    let mut base_accel = std::collections::HashSet::new();
+    let mut m_values = std::collections::HashSet::new();
+    let mut accel_params = std::collections::HashMap::new();
+    let mut series_params = std::collections::HashMap::new();
+
+    for (series, accel_records) in entries.iter() {
+        // Collect series-level fields
+        precisions.insert(series.precision.clone());
+        base_series.insert(series.name.clone());
+
+        // Collect series parameters
+        for (key, value) in &series.arguments {
+            series_params
+                .entry(key.clone())
+                .or_insert_with(std::collections::HashSet::new)
+                .insert(value.clone());
+        }
+
+        // Collect acceleration-level fields
+        for accel_record in accel_records.iter() {
+            base_accel.insert(accel_record.accel_info.name.clone());
+            m_values.insert(accel_record.accel_info.m_value);
+
+            // Collect acceleration parameters
+            for (key, value) in &accel_record.accel_info.additional_args {
+                accel_params
+                    .entry(key.clone())
+                    .or_insert_with(std::collections::HashSet::new)
+                    .insert(value.clone());
+            }
+        }
+    }
+
+    // Remove fields that have only one unique value (not filterable)
+    let mut result = Filters::default();
+
+    if precisions.len() > 1 {
+        result.precisions = precisions;
+    }
+    if base_series.len() > 1 {
+        result.base_series = base_series;
+    }
+    if base_accel.len() > 1 {
+        result.base_accel = base_accel;
+    }
+    if m_values.len() > 1 {
+        result.m_values = m_values;
+    }
+
+    // Only keep parameters that have multiple values
+    for (key, values) in series_params {
+        if values.len() > 1 {
+            result.series_params.insert(key, values);
+        }
+    }
+
+    for (key, values) in accel_params {
+        if values.len() > 1 {
+            result.accel_params.insert(key, values);
+        }
+    }
+
+    result
+}
+
+pub struct Viz {
     // Plot options
     show_partial_sums: bool,
     show_limits: bool,
     show_imaginary: bool,
-
-    // Каналы для асинхронной загрузки данных
-    data_sender: Option<mpsc::Sender<Result<Vec<DataItem>>>>,
-    data_receiver: Option<mpsc::Receiver<Result<Vec<DataItem>>>>,
-    loading: bool,
 
     // Screenshot functionality
     pending_screenshots: HashMap<&'static str, egui::Rect>,
@@ -27,62 +88,7 @@ pub struct DashboardApp {
     plot_hovered: bool,
 }
 
-impl DashboardApp {
-    pub fn new(loader: Arc<DataLoader>) -> Self {
-        let (tx, rx) =
-            std::sync::mpsc::channel::<std::result::Result<Vec<DataItem>, anyhow::Error>>();
-        Self {
-            loader,
-            filters: Filters::default(),
-            data: None,
-            show_partial_sums: true,
-            show_limits: true,
-            show_imaginary: true,
-            data_sender: Some(tx),
-            data_receiver: Some(rx),
-            loading: false,
-            pending_screenshots: HashMap::new(),
-            plot_hovered: false,
-        }
-    }
-
-    fn update_data(&mut self) {
-        if let (Some(sender), _) = (&self.data_sender, &self.data_receiver) {
-            let filters = self.filters.clone();
-            let loader = self.loader.clone();
-            let tx = sender.clone();
-
-            // Запускаем загрузку в отдельном потоке
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                let result: std::result::Result<Vec<DataItem>, anyhow::Error> =
-                    rt.block_on(loader.filter_data(&filters));
-                let _ = tx.send(result);
-            });
-
-            self.loading = true;
-        }
-    }
-
-    fn check_for_data(&mut self) {
-        if let Some(receiver) = &self.data_receiver {
-            if let Ok(result) = receiver.try_recv() {
-                match result {
-                    Ok(data) => {
-                        let len = data.len();
-                        self.data = Some(data);
-                        println!("Loaded {} items after filtering", len);
-                    }
-                    Err(e) => {
-                        eprintln!("Error filtering data: {}", e);
-                        self.data = None;
-                    }
-                }
-                self.loading = false;
-            }
-        }
-    }
-
+impl Viz {
     fn format_series_name_with_args(&self, series: &crate::data_loader::SeriesRecord) -> String {
         let mut name = series.precision.clone() + " " + &series.name;
 
@@ -220,347 +226,406 @@ impl DashboardApp {
         Ok(())
     }
 
-    fn create_convergence_plot(&mut self, ui: &mut egui::Ui) {
-        if let Some(ref data) = self.data {
-            if data.is_empty() {
-                ui.label("Нет данных для отображения");
-                return;
+    fn create_convergence_plot(&mut self, ui: &mut egui::Ui, data: &[DataItemRef]) {
+        if data.is_empty() {
+            ui.label("Нет данных для отображения");
+            return;
+        }
+
+        let mut lines = Vec::new();
+        let mut partial_sum_series = std::collections::HashSet::new();
+        let mut limit_series = std::collections::HashSet::new();
+        let mut limit_lines = Vec::new();
+
+        // Calculate X range for 1:1 aspect ratio with fixed Y bounds [-10, 10]
+        let mut min_x = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        for (series, _) in data {
+            if !series.computed.is_empty() {
+                for point in &series.computed {
+                    min_x = min_x.min(point.n as f64);
+                    max_x = max_x.max(point.n as f64);
+                }
+            }
+        }
+
+        for (series, accel_records) in data {
+            if series.computed.is_empty() {
+                continue;
             }
 
-            let mut lines = Vec::new();
-            let mut partial_sum_series = std::collections::HashSet::new();
-            let mut limit_series = std::collections::HashSet::new();
-            let mut limit_lines = Vec::new();
+            // Partial sums (one per series)
+            if self.show_partial_sums && !partial_sum_series.contains(&series.name) {
+                partial_sum_series.insert(series.name.clone());
 
-            // Calculate X range for 1:1 aspect ratio with fixed Y bounds [-10, 10]
-            let mut min_x = f64::INFINITY;
-            let mut max_x = f64::NEG_INFINITY;
-            for (series, _) in data {
-                if !series.computed.is_empty() {
-                    for point in &series.computed {
-                        min_x = min_x.min(point.n as f64);
-                        max_x = max_x.max(point.n as f64);
-                    }
+                let has_complex = series.computed.iter().any(|c| c.value.imag.abs() > 1e-15);
+
+                let partial_points: PlotPoints = series
+                    .computed
+                    .iter()
+                    .map(|c| [c.n as f64, c.value.real])
+                    .collect();
+
+                lines.push(
+                    Line::new(partial_points)
+                        .name(format!(
+                            "{} (частичные суммы)",
+                            self.format_series_name_with_args(series)
+                        ))
+                        .color(egui::Color32::from_rgb(128, 128, 128)),
+                );
+
+                // Imaginary partial sums
+                if has_complex && self.show_imaginary {
+                    let imag_partial_points: PlotPoints = series
+                        .computed
+                        .iter()
+                        .map(|c| [c.n as f64, c.value.imag])
+                        .collect();
+
+                    lines.push(
+                        Line::new(imag_partial_points)
+                            .name(format!(
+                                "{} (частичные суммы, мнимая часть)",
+                                self.format_series_name_with_args(series)
+                            ))
+                            .color(egui::Color32::from_rgb(255, 192, 203)),
+                    );
                 }
             }
 
-            for (series, accel_records) in data {
-                if series.computed.is_empty() {
+            // Limit line (one per series)
+            if self.show_limits && !limit_series.contains(&series.name) {
+                let limit = &series.series_limit;
+                let x_range: Vec<f64> = series.computed.iter().map(|c| c.n as f64).collect();
+                if !x_range.is_empty() {
+                    let min_x = x_range.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+                    let max_x = x_range.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+                    let limit_points =
+                        PlotPoints::new(vec![[min_x, limit.real], [max_x, limit.real]]);
+                    limit_series.insert(series.name.clone());
+                    limit_lines.push((series.name.clone(), limit_points));
+                }
+            }
+
+            // Process each acceleration record
+            for accel_record in accel_records {
+                if accel_record.computed.is_empty() {
                     continue;
                 }
 
-                // Partial sums (one per series)
-                if self.show_partial_sums && !partial_sum_series.contains(&series.name) {
-                    partial_sum_series.insert(series.name.clone());
+                let item_name = self.format_item_name(series, &accel_record.accel_info);
+                let has_complex = accel_record
+                    .computed
+                    .iter()
+                    .any(|cn| cn.map_or(false, |ap| ap.value.imag.abs() > 1e-15));
 
-                    let has_complex = series.computed.iter().any(|c| c.value.imag.abs() > 1e-15);
+                // Main convergence line - zip series computed with accel computed
+                let points: PlotPoints = series
+                    .computed
+                    .iter()
+                    .zip(accel_record.computed.iter())
+                    .filter_map(|(c, accel)| accel.map(|ap| [c.n as f64, ap.value.real]))
+                    .collect();
 
-                    let partial_points: PlotPoints = series
-                        .computed
-                        .iter()
-                        .map(|c| [c.n as f64, c.value.real])
-                        .collect();
+                lines.push(Line::new(points).name(item_name.clone()));
 
-                    lines.push(
-                        Line::new(partial_points)
-                            .name(format!(
-                                "{} (частичные суммы)",
-                                self.format_series_name_with_args(series)
-                            ))
-                            .color(egui::Color32::from_rgb(128, 128, 128)),
-                    );
-
-                    // Imaginary partial sums
-                    if has_complex && self.show_imaginary {
-                        let imag_partial_points: PlotPoints = series
-                            .computed
-                            .iter()
-                            .map(|c| [c.n as f64, c.value.imag])
-                            .collect();
-
-                        lines.push(
-                            Line::new(imag_partial_points)
-                                .name(format!(
-                                    "{} (частичные суммы, мнимая часть)",
-                                    self.format_series_name_with_args(series)
-                                ))
-                                .color(egui::Color32::from_rgb(255, 192, 203)),
-                        );
-                    }
-                }
-
-                // Limit line (one per series)
-                if self.show_limits && !limit_series.contains(&series.name) {
-                    let limit = &series.series_limit;
-                    let x_range: Vec<f64> = series.computed.iter().map(|c| c.n as f64).collect();
-                    if !x_range.is_empty() {
-                        let min_x = x_range.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-                        let max_x = x_range.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-                        let limit_points =
-                            PlotPoints::new(vec![[min_x, limit.real], [max_x, limit.real]]);
-                        limit_series.insert(series.name.clone());
-                        limit_lines.push((series.name.clone(), limit_points));
-                    }
-                }
-
-                // Process each acceleration record
-                for accel_record in accel_records {
-                    if accel_record.computed.is_empty() {
-                        continue;
-                    }
-
-                    let item_name = self.format_item_name(series, &accel_record.accel_info);
-                    let has_complex = accel_record
-                        .computed
-                        .iter()
-                        .any(|cn| cn.map_or(false, |ap| ap.value.imag.abs() > 1e-15));
-
-                    // Main convergence line - zip series computed with accel computed
-                    let points: PlotPoints = series
+                // Imaginary part if present and enabled
+                if has_complex && self.show_imaginary {
+                    let imag_points: PlotPoints = series
                         .computed
                         .iter()
                         .zip(accel_record.computed.iter())
-                        .filter_map(|(c, accel)| accel.map(|ap| [c.n as f64, ap.value.real]))
+                        .filter_map(|(c, accel)| accel.map(|ap| [c.n as f64, ap.value.imag]))
                         .collect();
 
-                    lines.push(Line::new(points).name(item_name.clone()));
-
-                    // Imaginary part if present and enabled
-                    if has_complex && self.show_imaginary {
-                        let imag_points: PlotPoints = series
-                            .computed
-                            .iter()
-                            .zip(accel_record.computed.iter())
-                            .filter_map(|(c, accel)| accel.map(|ap| [c.n as f64, ap.value.imag]))
-                            .collect();
-
-                        lines.push(
-                            Line::new(imag_points)
-                                .name(format!("{} (мнимая часть)", item_name))
-                                .color(egui::Color32::from_rgb(255, 165, 0)),
-                        );
-                    }
-                }
-            }
-
-            // Add limit lines
-            for (series_name, points) in limit_lines {
-                // Find the series record to get arguments
-                if let Some((series, _)) = data.iter().find(|(s, _)| s.name == series_name) {
                     lines.push(
-                        Line::new(points)
-                            .name(format!(
-                                "{} (предел)",
-                                self.format_series_name_with_args(series)
-                            ))
-                            .color(egui::Color32::from_rgb(255, 0, 0))
-                            .stroke(egui::Stroke::new(3.0, egui::Color32::from_rgb(255, 0, 0))),
+                        Line::new(imag_points)
+                            .name(format!("{} (мнимая часть)", item_name))
+                            .color(egui::Color32::from_rgb(255, 165, 0)),
                     );
                 }
             }
+        }
 
-            let mut plot = Plot::new("convergence")
-                .allow_zoom(true)
-                .allow_drag(true)
-                .height(900.0)
-                .x_axis_label("Итерация n")
-                .y_axis_label("Значение")
-                .legend(egui_plot::Legend::default());
+        // Add limit lines
+        for (series_name, points) in limit_lines {
+            // Find the series record to get arguments
+            if let Some((series, _)) = data.iter().find(|(s, _)| s.name == series_name) {
+                lines.push(
+                    Line::new(points)
+                        .name(format!(
+                            "{} (предел)",
+                            self.format_series_name_with_args(series)
+                        ))
+                        .color(egui::Color32::from_rgb(255, 0, 0))
+                        .stroke(egui::Stroke::new(3.0, egui::Color32::from_rgb(255, 0, 0))),
+                );
+            }
+        }
 
-            // Set fixed Y bounds [-10, 10] and calculate X bounds for 1:1 aspect ratio
-            if min_x != f64::INFINITY && max_x != f64::NEG_INFINITY {
-                // Y range is fixed at 20 units (from -10 to 10)
-                let y_range = 20.0;
-                let data_x_range = max_x - min_x;
+        let mut plot = Plot::new("convergence")
+            .allow_zoom(true)
+            .allow_drag(true)
+            .height(900.0)
+            .x_axis_label("Итерация n")
+            .y_axis_label("Значение")
+            .legend(egui_plot::Legend::default());
 
-                // Center X range around data, but ensure it's at least as wide as Y range for 1:1 aspect ratio
-                let x_range = data_x_range.max(y_range);
-                let x_center = (min_x + max_x) / 2.0;
-                let x_min = x_center - x_range / 2.0;
-                let x_max = x_center + x_range / 2.0;
+        // Set fixed Y bounds [-10, 10] and calculate X bounds for 1:1 aspect ratio
+        if min_x != f64::INFINITY && max_x != f64::NEG_INFINITY {
+            // Y range is fixed at 20 units (from -10 to 10)
+            let y_range = 20.0;
+            let data_x_range = max_x - min_x;
 
-                plot = plot
-                    .auto_bounds(egui::Vec2b::new(false, false)) // Disable auto bounds for both axes
-                    .include_x(x_min)
-                    .include_x(x_max)
-                    .include_y(-10.0)
-                    .include_y(10.0);
+            // Center X range around data, but ensure it's at least as wide as Y range for 1:1 aspect ratio
+            let x_range = data_x_range.max(y_range);
+            let x_center = (min_x + max_x) / 2.0;
+            let x_min = x_center - x_range / 2.0;
+            let x_max = x_center + x_range / 2.0;
+
+            plot = plot
+                .auto_bounds(egui::Vec2b::new(false, false)) // Disable auto bounds for both axes
+                .include_x(x_min)
+                .include_x(x_max)
+                .include_y(-10.0)
+                .include_y(10.0);
+        }
+
+        let plot = plot.show(ui, |plot_ui| {
+            for line in lines {
+                plot_ui.line(line);
+            }
+        });
+        self.plot_hovered |= plot.response.hovered();
+        ui.horizontal(|ui| {
+            if ui.button("📸 Снимок экрана").clicked() {
+                self.request_screenshot(ui.ctx(), "convergence", plot.response.rect);
+            }
+        });
+    }
+
+    fn create_error_plot(&mut self, ui: &mut egui::Ui, data: &[DataItemRef]) {
+        if data.is_empty() {
+            ui.label("Нет данных для отображения");
+            return;
+        }
+
+        let mut lines = Vec::new();
+        let mut min_x = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+
+        for (series, accel_records) in data.iter() {
+            if series.computed.is_empty() {
+                continue;
             }
 
-            let plot = plot.show(ui, |plot_ui| {
+            for accel_record in accel_records.iter() {
+                if accel_record.computed.is_empty() {
+                    continue;
+                }
+
+                let item_name = self.format_item_name(series, &accel_record.accel_info);
+
+                // Use Euclidean metric with machine epsilon for log scale, clamp to -1000
+                let points: PlotPoints = series
+                    .computed
+                    .iter()
+                    .zip(accel_record.computed.iter())
+                    .filter_map(|(c, accel)| {
+                        accel.map(|ap| {
+                            let error = ap.deviation.max(-1000.0); // Clamp to -1000
+                            min_x = min_x.min(c.n as f64);
+                            max_x = max_x.max(c.n as f64);
+                            [c.n as f64, error]
+                        })
+                    })
+                    .collect();
+
+                lines.push(Line::new(points).name(item_name));
+            }
+        }
+
+        let plot = Plot::new("error")
+            .allow_zoom(true)
+            .allow_drag(true)
+            .height(900.0)
+            .x_axis_label("Итерация n")
+            .y_axis_label("Абсолютная ошибка (log)")
+            .legend(egui_plot::Legend::default())
+            .show(ui, |plot_ui| {
+                // Add horizontal line at -1000 with tooltip
+                if min_x != f64::INFINITY && max_x != f64::NEG_INFINITY {
+                    let zero_line =
+                        Line::new(PlotPoints::new(vec![[min_x, -1000.0], [max_x, -1000.0]]))
+                            .name("≈ 0")
+                            .color(egui::Color32::from_rgb(255, 0, 0))
+                            .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 0, 0)));
+                    plot_ui.line(zero_line);
+                }
+
                 for line in lines {
                     plot_ui.line(line);
                 }
             });
-            self.plot_hovered |= plot.response.hovered();
-            ui.horizontal(|ui| {
-                if ui.button("📸 Снимок экрана").clicked() {
-                    self.request_screenshot(ui.ctx(), "convergence", plot.response.rect);
-                }
-            });
-        } else {
-            ui.label("Нет данных для отображения");
-        }
+        self.plot_hovered |= plot.response.hovered();
+        ui.horizontal(|ui| {
+            if ui.button("📸 Снимок экрана").clicked() {
+                self.request_screenshot(ui.ctx(), "error", plot.response.rect);
+            }
+        });
     }
 
-    fn create_error_plot(&mut self, ui: &mut egui::Ui) {
-        if let Some(ref data) = self.data {
-            if data.is_empty() {
-                ui.label("Нет данных для отображения");
-                return;
+    fn create_performance_plot(&mut self, ui: &mut egui::Ui, data: &[DataItemRef]) {
+        if data.is_empty() {
+            ui.label("Нет данных для отображения");
+            return;
+        }
+
+        let mut point_series = Vec::new();
+        let mut min_x = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+
+        for (series, accel_records) in data {
+            if series.computed.is_empty() {
+                continue;
             }
 
-            let mut lines = Vec::new();
-            let mut min_x = f64::INFINITY;
-            let mut max_x = f64::NEG_INFINITY;
-
-            for (series, accel_records) in data {
-                if series.computed.is_empty() {
+            for accel_record in accel_records {
+                if accel_record.computed.is_empty() {
                     continue;
                 }
 
-                for accel_record in accel_records {
-                    if accel_record.computed.is_empty() {
-                        continue;
-                    }
+                let item_name = self.format_item_name(series, &accel_record.accel_info);
 
-                    let item_name = self.format_item_name(series, &accel_record.accel_info);
+                // Find minimum error and corresponding iteration
+                let mut min_error = f64::INFINITY;
+                let mut min_error_iter = 0;
 
-                    // Use Euclidean metric with machine epsilon for log scale, clamp to -1000
-                    let points: PlotPoints = series
-                        .computed
-                        .iter()
-                        .zip(accel_record.computed.iter())
-                        .filter_map(|(c, accel)| {
-                            accel.map(|ap| {
-                                let error = ap.deviation.max(-1000.0); // Clamp to -1000
-                                min_x = min_x.min(c.n as f64);
-                                max_x = max_x.max(c.n as f64);
-                                [c.n as f64, error]
-                            })
-                        })
-                        .collect();
+                for (c, accel) in series.computed.iter().zip(accel_record.computed.iter()) {
+                    if let Some(ap) = accel {
+                        let error = ap.deviation; // Already logarithmic
 
-                    lines.push(Line::new(points).name(item_name));
-                }
-            }
-
-            let plot = Plot::new("error")
-                .allow_zoom(true)
-                .allow_drag(true)
-                .height(900.0)
-                .x_axis_label("Итерация n")
-                .y_axis_label("Абсолютная ошибка (log)")
-                .legend(egui_plot::Legend::default())
-                .show(ui, |plot_ui| {
-                    // Add horizontal line at -1000 with tooltip
-                    if min_x != f64::INFINITY && max_x != f64::NEG_INFINITY {
-                        let zero_line =
-                            Line::new(PlotPoints::new(vec![[min_x, -1000.0], [max_x, -1000.0]]))
-                                .name("≈ 0")
-                                .color(egui::Color32::from_rgb(255, 0, 0))
-                                .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 0, 0)));
-                        plot_ui.line(zero_line);
-                    }
-
-                    for line in lines {
-                        plot_ui.line(line);
-                    }
-                });
-            self.plot_hovered |= plot.response.hovered();
-            ui.horizontal(|ui| {
-                if ui.button("📸 Снимок экрана").clicked() {
-                    self.request_screenshot(ui.ctx(), "error", plot.response.rect);
-                }
-            });
-        } else {
-            ui.label("Нет данных для отображения");
-        }
-    }
-
-    fn create_performance_plot(&mut self, ui: &mut egui::Ui) {
-        if let Some(ref data) = self.data {
-            if data.is_empty() {
-                ui.label("Нет данных для отображения");
-                return;
-            }
-
-            let mut point_series = Vec::new();
-            let mut min_x = f64::INFINITY;
-            let mut max_x = f64::NEG_INFINITY;
-
-            for (series, accel_records) in data {
-                if series.computed.is_empty() {
-                    continue;
-                }
-
-                for accel_record in accel_records {
-                    if accel_record.computed.is_empty() {
-                        continue;
-                    }
-
-                    let item_name = self.format_item_name(series, &accel_record.accel_info);
-
-                    // Find minimum error and corresponding iteration
-                    let mut min_error = f64::INFINITY;
-                    let mut min_error_iter = 0;
-
-                    for (c, accel) in series.computed.iter().zip(accel_record.computed.iter()) {
-                        if let Some(ap) = accel {
-                            let error = ap.deviation; // Already logarithmic
-
-                            if error < min_error {
-                                min_error = error;
-                                min_error_iter = c.n;
-                            }
+                        if error < min_error {
+                            min_error = error;
+                            min_error_iter = c.n;
                         }
                     }
+                }
 
-                    if min_error < f64::INFINITY {
-                        let clamped_error = min_error.max(-1000.0); // Clamp to -1000
-                        min_x = min_x.min(min_error_iter as f64);
-                        max_x = max_x.max(min_error_iter as f64);
-                        let point = PlotPoints::new(vec![[min_error_iter as f64, clamped_error]]);
-                        point_series.push((item_name, point));
-                    }
+                if min_error < f64::INFINITY {
+                    let clamped_error = min_error.max(-1000.0); // Clamp to -1000
+                    min_x = min_x.min(min_error_iter as f64);
+                    max_x = max_x.max(min_error_iter as f64);
+                    let point = PlotPoints::new(vec![[min_error_iter as f64, clamped_error]]);
+                    point_series.push((item_name, point));
                 }
             }
+        }
 
-            let plot = Plot::new("performance")
-                .allow_zoom(true)
-                .allow_drag(true)
-                .height(900.0)
-                .x_axis_label("Итерация достижения минимальной ошибки")
-                .y_axis_label("Минимальная ошибка (log)")
-                .legend(egui_plot::Legend::default())
-                .show(ui, |plot_ui| {
-                    // Add horizontal line at -1000 with tooltip
-                    if min_x != f64::INFINITY && max_x != f64::NEG_INFINITY {
-                        let zero_line =
-                            Line::new(PlotPoints::new(vec![[min_x, -1000.0], [max_x, -1000.0]]))
-                                .name("≈ 0")
-                                .color(egui::Color32::from_rgb(255, 0, 0))
-                                .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 0, 0)));
-                        plot_ui.line(zero_line);
-                    }
+        let plot = Plot::new("performance")
+            .allow_zoom(true)
+            .allow_drag(true)
+            .height(900.0)
+            .x_axis_label("Итерация достижения минимальной ошибки")
+            .y_axis_label("Минимальная ошибка (log)")
+            .legend(egui_plot::Legend::default())
+            .show(ui, |plot_ui| {
+                // Add horizontal line at -1000 with tooltip
+                if min_x != f64::INFINITY && max_x != f64::NEG_INFINITY {
+                    let zero_line =
+                        Line::new(PlotPoints::new(vec![[min_x, -1000.0], [max_x, -1000.0]]))
+                            .name("≈ 0")
+                            .color(egui::Color32::from_rgb(255, 0, 0))
+                            .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 0, 0)));
+                    plot_ui.line(zero_line);
+                }
 
-                    for (name, points) in point_series {
-                        plot_ui.points(
-                            Points::new(points)
-                                .name(name)
-                                .shape(MarkerShape::Circle)
-                                .radius(4.0),
-                        );
-                    }
-                });
-            self.plot_hovered |= plot.response.hovered();
-            ui.horizontal(|ui| {
-                if ui.button("📸 Снимок экрана").clicked() {
-                    self.request_screenshot(ui.ctx(), "performance", plot.response.rect);
+                for (name, points) in point_series {
+                    plot_ui.points(
+                        Points::new(points)
+                            .name(name)
+                            .shape(MarkerShape::Circle)
+                            .radius(4.0),
+                    );
                 }
             });
-        } else {
-            ui.label("Нет данных для отображения");
+        self.plot_hovered |= plot.response.hovered();
+        ui.horizontal(|ui| {
+            if ui.button("📸 Снимок экрана").clicked() {
+                self.request_screenshot(ui.ctx(), "performance", plot.response.rect);
+            }
+        });
+    }
+}
+
+pub struct DashboardApp {
+    loader: Arc<DataLoader>,
+    filters: Filters,
+    data: Option<(Vec<DataItem>, Filters, Filters)>,
+    // Каналы для асинхронной загрузки данных
+    data_sender: Option<mpsc::Sender<Result<Vec<DataItem>>>>,
+    data_receiver: Option<mpsc::Receiver<Result<Vec<DataItem>>>>,
+    loading: bool,
+    viz: Viz,
+}
+
+impl DashboardApp {
+    pub fn new(loader: Arc<DataLoader>) -> Self {
+        let (tx, rx) =
+            std::sync::mpsc::channel::<std::result::Result<Vec<DataItem>, anyhow::Error>>();
+        Self {
+            loader,
+            filters: Filters::default(),
+            data: None,
+            data_sender: Some(tx),
+            data_receiver: Some(rx),
+            loading: false,
+            viz: Viz {
+                show_partial_sums: true,
+                show_limits: true,
+                show_imaginary: true,
+                pending_screenshots: HashMap::new(),
+                plot_hovered: false,
+            },
+        }
+    }
+
+    fn update_data(&mut self) {
+        if let (Some(sender), _) = (&self.data_sender, &self.data_receiver) {
+            let filters = self.filters.clone();
+            let loader = self.loader.clone();
+            let tx = sender.clone();
+
+            // Запускаем загрузку в отдельном потоке
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let result: std::result::Result<Vec<DataItem>, anyhow::Error> =
+                    rt.block_on(loader.filter_data(&filters));
+                let _ = tx.send(result);
+            });
+
+            self.loading = true;
+        }
+    }
+
+    fn check_for_data(&mut self) {
+        if let Some(receiver) = &self.data_receiver {
+            if let Ok(result) = receiver.try_recv() {
+                match result {
+                    Ok(data) => {
+                        let len = data.len();
+                        let dynamic_filters = filterable(&data);
+                        self.data = Some((data, dynamic_filters, Filters::default()));
+                        println!("Loaded {} items after filtering", len);
+                    }
+                    Err(e) => {
+                        eprintln!("Error filtering data: {}", e);
+                        self.data = None;
+                    }
+                }
+                self.loading = false;
+            }
         }
     }
 }
@@ -656,13 +721,243 @@ fn param_filter_section(
     ui.add_space(2.0);
 }
 
+// Dynamic filtering UI function
+fn dynamic_ui_filter_section(
+    ui: &mut egui::Ui,
+    available_filters: &Filters,
+    selected_filters: &mut Filters,
+) {
+    if available_filters.precisions.is_empty()
+        && available_filters.base_series.is_empty()
+        && available_filters.base_accel.is_empty()
+        && available_filters.m_values.is_empty()
+        && available_filters.series_params.is_empty()
+        && available_filters.accel_params.is_empty()
+    {
+        return;
+    }
+    ui.heading("Быстрые фильтры");
+    ui.add_space(5.0);
+    ui.horizontal_wrapped(|ui| {
+        // Precision checkboxes
+        for precision in &available_filters.precisions {
+            let mut checked = selected_filters.precisions.contains(precision);
+            if ui
+                .checkbox(&mut checked, format!("prec={precision}"))
+                .changed()
+            {
+                if checked {
+                    selected_filters.precisions.insert(precision.clone());
+                } else {
+                    selected_filters.precisions.remove(precision);
+                }
+            }
+        }
+        // Series checkboxes
+        for series in &available_filters.base_series {
+            let mut checked = selected_filters.base_series.contains(series);
+            if ui
+                .checkbox(&mut checked, format!("series={series}"))
+                .changed()
+            {
+                if checked {
+                    selected_filters.base_series.insert(series.clone());
+                } else {
+                    selected_filters.base_series.remove(series);
+                }
+            }
+        }
+        // Acceleration checkboxes
+        for accel in &available_filters.base_accel {
+            let mut checked = selected_filters.base_accel.contains(accel);
+            if ui
+                .checkbox(&mut checked, format!("accel={accel}"))
+                .changed()
+            {
+                if checked {
+                    selected_filters.base_accel.insert(accel.clone());
+                } else {
+                    selected_filters.base_accel.remove(accel);
+                }
+            }
+        }
+        // M values checkboxes
+        for m in &available_filters.m_values {
+            let mut checked = selected_filters.m_values.contains(m);
+            if ui.checkbox(&mut checked, format!("m={}", m)).changed() {
+                if checked {
+                    selected_filters.m_values.insert(*m);
+                } else {
+                    selected_filters.m_values.remove(m);
+                }
+            }
+        }
+        // Series parameters checkboxes
+        for (param_name, values) in &available_filters.series_params {
+            for value in values {
+                let param_selected = selected_filters
+                    .series_params
+                    .get(param_name)
+                    .map(|set| set.contains(value))
+                    .unwrap_or(false);
+                let mut checked = param_selected;
+                if ui
+                    .checkbox(&mut checked, format!("{param_name}={value}"))
+                    .changed()
+                {
+                    if checked {
+                        selected_filters
+                            .series_params
+                            .entry(param_name.clone())
+                            .or_insert_with(std::collections::HashSet::new)
+                            .insert(value.clone());
+                    } else {
+                        if let Some(set) = selected_filters.series_params.get_mut(param_name) {
+                            set.remove(value);
+                            if set.is_empty() {
+                                selected_filters.series_params.remove(param_name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Acceleration parameters checkboxes
+        for (param_name, values) in &available_filters.accel_params {
+            for value in values {
+                let param_selected = selected_filters
+                    .accel_params
+                    .get(param_name)
+                    .map(|set| set.contains(value))
+                    .unwrap_or(false);
+                let mut checked = param_selected;
+                if ui
+                    .checkbox(&mut checked, format!("{param_name}={value}"))
+                    .changed()
+                {
+                    if checked {
+                        selected_filters
+                            .accel_params
+                            .entry(param_name.clone())
+                            .or_insert_with(std::collections::HashSet::new)
+                            .insert(value.clone());
+                    } else {
+                        if let Some(set) = selected_filters.accel_params.get_mut(param_name) {
+                            set.remove(value);
+                            if set.is_empty() {
+                                selected_filters.accel_params.remove(param_name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+    ui.add_space(5.0);
+}
+
+pub fn filter_data_items<'a>(
+    data_items: &'a [(SeriesRecord, Vec<AccelRecord>)],
+    filters: &Filters,
+) -> Vec<(&'a SeriesRecord, Vec<&'a AccelRecord>)> {
+    // Early return if no filters
+    if filters.precisions.is_empty()
+        && filters.base_series.is_empty()
+        && filters.base_accel.is_empty()
+        && filters.m_values.is_empty()
+        && filters.series_params.is_empty()
+        && filters.accel_params.is_empty()
+    {
+        return data_items
+            .iter()
+            .map(|(series, accel_records)| (series, accel_records.iter().collect()))
+            .collect();
+    }
+    data_items
+        .iter()
+        .filter(|(series, accel_records)| {
+            // Series-level filtering
+            let precision_match =
+                filters.precisions.is_empty() || filters.precisions.contains(&series.precision);
+
+            let series_match =
+                filters.base_series.is_empty() || filters.base_series.contains(&series.name);
+
+            let series_params_match = filters.series_params.is_empty()
+                || filters
+                    .series_params
+                    .iter()
+                    .all(|(param_name, allowed_values)| {
+                        series
+                            .arguments
+                            .get(param_name)
+                            .map(|value| allowed_values.contains(value))
+                            .unwrap_or(false)
+                    });
+            if !precision_match || !series_match || !series_params_match {
+                return false;
+            }
+            // Check if any acceleration records match
+            accel_records.iter().any(|accel_record| {
+                let accel_match = filters.base_accel.is_empty()
+                    || filters.base_accel.contains(&accel_record.accel_info.name);
+
+                let m_value_match = filters.m_values.is_empty()
+                    || filters.m_values.contains(&accel_record.accel_info.m_value);
+
+                let accel_params_match = filters.accel_params.is_empty()
+                    || filters
+                        .accel_params
+                        .iter()
+                        .all(|(param_name, allowed_values)| {
+                            accel_record
+                                .accel_info
+                                .additional_args
+                                .get(param_name)
+                                .map(|value| allowed_values.contains(value))
+                                .unwrap_or(false)
+                        });
+                accel_match && m_value_match && accel_params_match
+            })
+        })
+        .map(|(series, accel_records)| {
+            // Filter acceleration records for the final result
+            let filtered_accel_records: Vec<&'a AccelRecord> = accel_records
+                .iter()
+                .filter(|accel_record| {
+                    let accel_match = filters.base_accel.is_empty()
+                        || filters.base_accel.contains(&accel_record.accel_info.name);
+
+                    let m_value_match = filters.m_values.is_empty()
+                        || filters.m_values.contains(&accel_record.accel_info.m_value);
+
+                    let accel_params_match = filters.accel_params.is_empty()
+                        || filters
+                            .accel_params
+                            .iter()
+                            .all(|(param_name, allowed_values)| {
+                                accel_record
+                                    .accel_info
+                                    .additional_args
+                                    .get(param_name)
+                                    .map(|value| allowed_values.contains(value))
+                                    .unwrap_or(false)
+                            });
+                    accel_match && m_value_match && accel_params_match
+                })
+                .collect();
+            (series, filtered_accel_records)
+        })
+        .collect()
+}
+
 impl eframe::App for DashboardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Проверяем наличие новых данных от фоновых потоков
         self.check_for_data();
 
         // Handle screenshot events
-        if let Err(e) = self.handle_screenshot_events(ctx) {
+        if let Err(e) = self.viz.handle_screenshot_events(ctx) {
             eprintln!("Screenshot error: {}", e);
         }
 
@@ -670,10 +965,10 @@ impl eframe::App for DashboardApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             // Configure scroll area based on plot hover state
             let mut scroll_area = egui::ScrollArea::vertical();
-            if self.plot_hovered {
+            if self.viz.plot_hovered {
                 // Disable scrolling when any plot is hovered
                 scroll_area = scroll_area.enable_scrolling(false);
-                self.plot_hovered = false;
+                self.viz.plot_hovered = false;
             }
 
             scroll_area.show(ui, |ui| {
@@ -775,9 +1070,9 @@ impl eframe::App for DashboardApp {
                 });
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Опции графиков:");
-                    ui.checkbox(&mut self.show_partial_sums, "Частичные суммы");
-                    ui.checkbox(&mut self.show_limits, "Пределы");
-                    ui.checkbox(&mut self.show_imaginary, "Мнимые части");
+                    ui.checkbox(&mut self.viz.show_partial_sums, "Частичные суммы");
+                    ui.checkbox(&mut self.viz.show_limits, "Пределы");
+                    ui.checkbox(&mut self.viz.show_imaginary, "Мнимые части");
                 });
 
                 ui.separator();
@@ -792,7 +1087,7 @@ impl eframe::App for DashboardApp {
                             self.update_data();
                         }
                     }
-                    if let Some(ref data) = self.data {
+                    if let Some((ref data, _, _)) = self.data {
                         ui.label(format!("Загружено записей: {}", data.len()));
                     }
                 });
@@ -800,20 +1095,32 @@ impl eframe::App for DashboardApp {
                 ui.add_space(20.0);
 
                 // Графики
-                if self.data.is_some() {
+                if let Some((data, available_dynamic_filters, selected_dynamic_filters)) =
+                    &mut self.data
+                {
+                    // Dynamic filters section
+                    dynamic_ui_filter_section(
+                        ui,
+                        available_dynamic_filters,
+                        selected_dynamic_filters,
+                    );
+                    let data = filter_data_items(data, selected_dynamic_filters);
+
+                    ui.separator();
+
                     // Convergence plot
                     ui.collapsing("Сходимость методов", |ui| {
-                        self.create_convergence_plot(ui);
+                        self.viz.create_convergence_plot(ui, &data);
                     });
 
                     // Error plot
                     ui.collapsing("Ошибка сходимости", |ui| {
-                        self.create_error_plot(ui);
+                        self.viz.create_error_plot(ui, &data);
                     });
 
                     // Performance plot
                     ui.collapsing("Производительность методов", |ui| {
-                        self.create_performance_plot(ui);
+                        self.viz.create_performance_plot(ui, &data);
                     });
                 } else if self.loading {
                     ui.centered_and_justified(|ui| {
