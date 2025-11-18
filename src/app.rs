@@ -2,13 +2,13 @@ use crate::data_loader::{DataItem, DataLoader, Filters};
 use anyhow::Result;
 use eframe::egui;
 use egui_plot::{Line, MarkerShape, Plot, PlotPoints, Points};
+use std::collections::HashMap;
 use std::sync::{Arc, mpsc};
 
 pub struct DashboardApp {
     loader: Arc<DataLoader>,
     filters: Filters,
     data: Option<Vec<DataItem>>,
-
 
     // Plot options
     show_partial_sums: bool,
@@ -19,6 +19,9 @@ pub struct DashboardApp {
     data_sender: Option<mpsc::Sender<Result<Vec<DataItem>>>>,
     data_receiver: Option<mpsc::Receiver<Result<Vec<DataItem>>>>,
     loading: bool,
+
+    // Screenshot functionality
+    pending_screenshots: HashMap<&'static str, egui::Rect>,
 }
 
 impl DashboardApp {
@@ -35,6 +38,7 @@ impl DashboardApp {
             data_sender: Some(tx),
             data_receiver: Some(rx),
             loading: false,
+            pending_screenshots: HashMap::new(),
         }
     }
 
@@ -123,7 +127,96 @@ impl DashboardApp {
         name
     }
 
-    fn create_convergence_plot(&self, ui: &mut egui::Ui) {
+    fn request_screenshot(
+        &mut self,
+        ctx: &egui::Context,
+        plot_id: &'static str,
+        plot_rect: egui::Rect,
+    ) {
+        self.pending_screenshots.insert(plot_id, plot_rect);
+        // Try without parameters first
+        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
+    }
+
+    fn handle_screenshot_events(&mut self, ctx: &egui::Context) -> Result<()> {
+        let mut screenshots_to_save = Vec::new();
+
+        // Find screenshot events
+        for event in &ctx.input(|i| i.events.clone()) {
+            if let egui::Event::Screenshot { image, .. } = event {
+                // Extract pending screenshots
+                for (plot_id, rect) in self.pending_screenshots.drain() {
+                    screenshots_to_save.push((plot_id, rect, image.clone()));
+                }
+            }
+        }
+
+        // Save screenshots
+        for (plot_id, rect, image_data) in screenshots_to_save {
+            self.save_cropped_image(ctx, &plot_id, rect, &image_data)?;
+        }
+
+        Ok(())
+    }
+
+    fn save_cropped_image(
+        &self,
+        ctx: &egui::Context,
+        plot_id: &str,
+        rect: egui::Rect,
+        image_data: &std::sync::Arc<egui::ColorImage>,
+    ) -> Result<()> {
+        let rect = egui::Rect {
+            min: egui::Pos2 {
+                x: rect.min.x - 10.0,
+                y: rect.min.y - 10.0,
+            },
+            max: egui::Pos2 {
+                x: rect.max.x - 10.0,
+                y: rect.max.y + 10.0,
+            },
+        };
+        // Convert egui ColorImage to image::DynamicImage
+        let width = image_data.size[0] as u32;
+        let height = image_data.size[1] as u32;
+
+        // Convert RGBA to RGB
+        let mut rgb_data = Vec::with_capacity((width * height * 3) as usize);
+        for pixel in &image_data.pixels {
+            rgb_data.push(pixel.r());
+            rgb_data.push(pixel.g());
+            rgb_data.push(pixel.b());
+        }
+
+        let img_buffer = image::RgbImage::from_raw(width, height, rgb_data)
+            .ok_or_else(|| anyhow::anyhow!("Failed to create RGB buffer"))?;
+
+        let dynamic_img = image::DynamicImage::ImageRgb8(img_buffer);
+
+        // Convert rect coordinates to pixel coordinates
+        let pixels_per_point = ctx.pixels_per_point();
+        let x = (rect.min.x * pixels_per_point) as u32;
+        let y = (rect.min.y * pixels_per_point) as u32;
+        let w = ((rect.max.x - rect.min.x) * pixels_per_point) as u32;
+        let h = ((rect.max.y - rect.min.y) * pixels_per_point) as u32;
+
+        // Crop image
+        let cropped_img = dynamic_img.crop_imm(x, y, w, h);
+
+        // Generate filename with timestamp
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs();
+        let filename = format!("{}_{}.png", plot_id, timestamp);
+
+        // Save cropped image
+        cropped_img.save(&filename)?;
+        println!("Screenshot saved: {}", filename);
+
+        Ok(())
+    }
+
+    fn create_convergence_plot(&mut self, ui: &mut egui::Ui) {
         if let Some(ref data) = self.data {
             if data.is_empty() {
                 ui.label("Нет данных для отображения");
@@ -166,7 +259,10 @@ impl DashboardApp {
 
                     lines.push(
                         Line::new(partial_points)
-                            .name(format!("{} (частичные суммы)", self.format_series_name_with_args(series)))
+                            .name(format!(
+                                "{} (частичные суммы)",
+                                self.format_series_name_with_args(series)
+                            ))
                             .color(egui::Color32::from_rgb(128, 128, 128)),
                     );
 
@@ -180,7 +276,10 @@ impl DashboardApp {
 
                         lines.push(
                             Line::new(imag_partial_points)
-                                .name(format!("{} (частичные суммы, мнимая часть)", self.format_series_name_with_args(series)))
+                                .name(format!(
+                                    "{} (частичные суммы, мнимая часть)",
+                                    self.format_series_name_with_args(series)
+                                ))
                                 .color(egui::Color32::from_rgb(255, 192, 203)),
                         );
                     }
@@ -237,8 +336,6 @@ impl DashboardApp {
                                 .color(egui::Color32::from_rgb(255, 165, 0)),
                         );
                     }
-
-
                 }
             }
 
@@ -248,7 +345,10 @@ impl DashboardApp {
                 if let Some((series, _)) = data.iter().find(|(s, _)| s.name == series_name) {
                     lines.push(
                         Line::new(points)
-                            .name(format!("{} (предел)", self.format_series_name_with_args(series)))
+                            .name(format!(
+                                "{} (предел)",
+                                self.format_series_name_with_args(series)
+                            ))
                             .color(egui::Color32::from_rgb(255, 0, 0))
                             .stroke(egui::Stroke::new(3.0, egui::Color32::from_rgb(255, 0, 0))),
                     );
@@ -267,23 +367,29 @@ impl DashboardApp {
                 // Y range is fixed at 20 units (from -10 to 10)
                 let y_range = 20.0;
                 let data_x_range = max_x - min_x;
-                
+
                 // Center X range around data, but ensure it's at least as wide as Y range for 1:1 aspect ratio
                 let x_range = data_x_range.max(y_range);
                 let x_center = (min_x + max_x) / 2.0;
                 let x_min = x_center - x_range / 2.0;
                 let x_max = x_center + x_range / 2.0;
-                
-                plot = plot.auto_bounds(egui::Vec2b::new(false, false)) // Disable auto bounds for both axes
+
+                plot = plot
+                    .auto_bounds(egui::Vec2b::new(false, false)) // Disable auto bounds for both axes
                     .include_x(x_min)
                     .include_x(x_max)
                     .include_y(-10.0)
                     .include_y(10.0);
             }
 
-            plot.show(ui, |plot_ui| {
+            let plot = plot.show(ui, |plot_ui| {
                 for line in lines {
                     plot_ui.line(line);
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui.button("📸 Снимок экрана").clicked() {
+                    self.request_screenshot(ui.ctx(), "convergence", plot.response.rect);
                 }
             });
         } else {
@@ -291,7 +397,7 @@ impl DashboardApp {
         }
     }
 
-    fn create_error_plot(&self, ui: &mut egui::Ui) {
+    fn create_error_plot(&mut self, ui: &mut egui::Ui) {
         if let Some(ref data) = self.data {
             if data.is_empty() {
                 ui.label("Нет данных для отображения");
@@ -319,7 +425,8 @@ impl DashboardApp {
                         .zip(accel_record.computed.iter())
                         .filter_map(|(c, accel)| {
                             accel.map(|ap| {
-                                let error = (ap.deviation.real.powi(2) + ap.deviation.imag.powi(2)).sqrt();
+                                let error =
+                                    (ap.deviation.real.powi(2) + ap.deviation.imag.powi(2)).sqrt();
                                 [c.n as f64, (error + f64::EPSILON).ln()] // Log scale with epsilon
                             })
                         })
@@ -329,7 +436,7 @@ impl DashboardApp {
                 }
             }
 
-            Plot::new("error")
+            let plot = Plot::new("error")
                 .allow_zoom(true)
                 .allow_drag(true)
                 .height(400.0)
@@ -340,12 +447,18 @@ impl DashboardApp {
                         plot_ui.line(line);
                     }
                 });
+
+            ui.horizontal(|ui| {
+                if ui.button("📸 Снимок экрана").clicked() {
+                    self.request_screenshot(ui.ctx(), "error", plot.response.rect);
+                }
+            });
         } else {
             ui.label("Нет данных для отображения");
         }
     }
 
-    fn create_performance_plot(&self, ui: &mut egui::Ui) {
+    fn create_performance_plot(&mut self, ui: &mut egui::Ui) {
         if let Some(ref data) = self.data {
             if data.is_empty() {
                 ui.label("Нет данных для отображения");
@@ -372,7 +485,8 @@ impl DashboardApp {
 
                     for (c, accel) in series.computed.iter().zip(accel_record.computed.iter()) {
                         if let Some(ap) = accel {
-                            let error = (ap.deviation.real.powi(2) + ap.deviation.imag.powi(2)).sqrt();
+                            let error =
+                                (ap.deviation.real.powi(2) + ap.deviation.imag.powi(2)).sqrt();
 
                             if error < min_error {
                                 min_error = error;
@@ -382,13 +496,16 @@ impl DashboardApp {
                     }
 
                     if min_error < f64::INFINITY {
-                        let point = PlotPoints::new(vec![[min_error_iter as f64, (min_error + f64::EPSILON).ln()]]);
+                        let point = PlotPoints::new(vec![[
+                            min_error_iter as f64,
+                            (min_error + f64::EPSILON).ln(),
+                        ]]);
                         point_series.push((item_name, point));
                     }
                 }
             }
 
-            Plot::new("performance")
+            let plot = Plot::new("performance")
                 .allow_zoom(true)
                 .allow_drag(true)
                 .height(400.0)
@@ -404,6 +521,11 @@ impl DashboardApp {
                         );
                     }
                 });
+            ui.horizontal(|ui| {
+                if ui.button("📸 Снимок экрана").clicked() {
+                    self.request_screenshot(ui.ctx(), "performance", plot.response.rect);
+                }
+            });
         } else {
             ui.label("Нет данных для отображения");
         }
@@ -506,6 +628,11 @@ impl eframe::App for DashboardApp {
         // Проверяем наличие новых данных от фоновых потоков
         self.check_for_data();
 
+        // Handle screenshot events
+        if let Err(e) = self.handle_screenshot_events(ctx) {
+            eprintln!("Screenshot error: {}", e);
+        }
+
         // Единая прокручиваемая область для всего контента
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
@@ -515,7 +642,8 @@ impl eframe::App for DashboardApp {
 
                 // Точность
                 ui.push_id("precision_filters", |ui| {
-                    let mut show_all = self.filters.precisions.len() == self.loader.metadata.precisions.len();
+                    let mut show_all =
+                        self.filters.precisions.len() == self.loader.metadata.precisions.len();
                     filter_section_horizontal(
                         ui,
                         "Точность",
@@ -527,7 +655,8 @@ impl eframe::App for DashboardApp {
 
                 // Базовые ряды
                 ui.push_id("series_filters", |ui| {
-                    let mut show_all = self.filters.base_series.len() == self.loader.metadata.series_names.len();
+                    let mut show_all =
+                        self.filters.base_series.len() == self.loader.metadata.series_names.len();
                     filter_section_horizontal(
                         ui,
                         "Базовые ряды",
@@ -549,7 +678,8 @@ impl eframe::App for DashboardApp {
 
                 // Базовые методы ускорения
                 ui.push_id("accel_filters", |ui| {
-                    let mut show_all = self.filters.base_accel.len() == self.loader.metadata.accel_names.len();
+                    let mut show_all =
+                        self.filters.base_accel.len() == self.loader.metadata.accel_names.len();
                     filter_section_horizontal(
                         ui,
                         "Базовые методы ускорения",
