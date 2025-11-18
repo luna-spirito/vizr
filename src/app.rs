@@ -22,6 +22,9 @@ pub struct DashboardApp {
 
     // Screenshot functionality
     pending_screenshots: HashMap<&'static str, egui::Rect>,
+
+    // Plot hover state for scroll control
+    plot_hovered: bool,
 }
 
 impl DashboardApp {
@@ -39,6 +42,7 @@ impl DashboardApp {
             data_receiver: Some(rx),
             loading: false,
             pending_screenshots: HashMap::new(),
+            plot_hovered: false,
         }
     }
 
@@ -168,12 +172,12 @@ impl DashboardApp {
     ) -> Result<()> {
         let rect = egui::Rect {
             min: egui::Pos2 {
-                x: rect.min.x - 10.0,
-                y: rect.min.y - 10.0,
+                x: rect.min.x - 20.0,
+                y: rect.min.y - 20.0,
             },
             max: egui::Pos2 {
-                x: rect.max.x - 10.0,
-                y: rect.max.y + 10.0,
+                x: rect.max.x - 20.0,
+                y: rect.max.y + 20.0,
             },
         };
         // Convert egui ColorImage to image::DynamicImage
@@ -387,6 +391,7 @@ impl DashboardApp {
                     plot_ui.line(line);
                 }
             });
+            self.plot_hovered |= plot.response.hovered();
             ui.horizontal(|ui| {
                 if ui.button("📸 Снимок экрана").clicked() {
                     self.request_screenshot(ui.ctx(), "convergence", plot.response.rect);
@@ -448,10 +453,11 @@ impl DashboardApp {
                 .show(ui, |plot_ui| {
                     // Add horizontal line at -1000 with tooltip
                     if min_x != f64::INFINITY && max_x != f64::NEG_INFINITY {
-                        let zero_line = Line::new(PlotPoints::new(vec![[min_x, -1000.0], [max_x, -1000.0]]))
-                            .name("≈ 0")
-                            .color(egui::Color32::from_rgb(255, 0, 0))
-                            .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 0, 0)));
+                        let zero_line =
+                            Line::new(PlotPoints::new(vec![[min_x, -1000.0], [max_x, -1000.0]]))
+                                .name("≈ 0")
+                                .color(egui::Color32::from_rgb(255, 0, 0))
+                                .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 0, 0)));
                         plot_ui.line(zero_line);
                     }
 
@@ -459,7 +465,7 @@ impl DashboardApp {
                         plot_ui.line(line);
                     }
                 });
-
+            self.plot_hovered |= plot.response.hovered();
             ui.horizontal(|ui| {
                 if ui.button("📸 Снимок экрана").clicked() {
                     self.request_screenshot(ui.ctx(), "error", plot.response.rect);
@@ -512,10 +518,7 @@ impl DashboardApp {
                         let clamped_error = min_error.max(-1000.0); // Clamp to -1000
                         min_x = min_x.min(min_error_iter as f64);
                         max_x = max_x.max(min_error_iter as f64);
-                        let point = PlotPoints::new(vec![[
-                            min_error_iter as f64,
-                            clamped_error,
-                        ]]);
+                        let point = PlotPoints::new(vec![[min_error_iter as f64, clamped_error]]);
                         point_series.push((item_name, point));
                     }
                 }
@@ -530,10 +533,11 @@ impl DashboardApp {
                 .show(ui, |plot_ui| {
                     // Add horizontal line at -1000 with tooltip
                     if min_x != f64::INFINITY && max_x != f64::NEG_INFINITY {
-                        let zero_line = Line::new(PlotPoints::new(vec![[min_x, -1000.0], [max_x, -1000.0]]))
-                            .name("≈ 0")
-                            .color(egui::Color32::from_rgb(255, 0, 0))
-                            .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 0, 0)));
+                        let zero_line =
+                            Line::new(PlotPoints::new(vec![[min_x, -1000.0], [max_x, -1000.0]]))
+                                .name("≈ 0")
+                                .color(egui::Color32::from_rgb(255, 0, 0))
+                                .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 0, 0)));
                         plot_ui.line(zero_line);
                     }
 
@@ -546,6 +550,7 @@ impl DashboardApp {
                         );
                     }
                 });
+            self.plot_hovered |= plot.response.hovered();
             ui.horizontal(|ui| {
                 if ui.button("📸 Снимок экрана").clicked() {
                     self.request_screenshot(ui.ctx(), "performance", plot.response.rect);
@@ -660,7 +665,15 @@ impl eframe::App for DashboardApp {
 
         // Единая прокручиваемая область для всего контента
         egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            // Configure scroll area based on plot hover state
+            let mut scroll_area = egui::ScrollArea::vertical();
+            if self.plot_hovered {
+                // Disable scrolling when any plot is hovered
+                scroll_area = scroll_area.enable_scrolling(false);
+                self.plot_hovered = false;
+            }
+
+            scroll_area.show(ui, |ui| {
                 // Фильтры
                 ui.heading("Фильтры");
                 ui.add_space(5.0);
