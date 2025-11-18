@@ -80,7 +80,7 @@ impl DashboardApp {
     }
 
     fn format_series_name_with_args(&self, series: &crate::data_loader::SeriesRecord) -> String {
-        let mut name = series.name.clone();
+        let mut name = series.precision.clone() + " " + &series.name;
 
         // Add series parameters
         if !series.arguments.is_empty() {
@@ -100,7 +100,7 @@ impl DashboardApp {
         series: &crate::data_loader::SeriesRecord,
         accel: &crate::data_loader::AccelInfo,
     ) -> String {
-        let mut name = format!("{} (m={}) ", accel.name, accel.m_value);
+        let mut name = format!("{} {} (m={}) ", series.precision, accel.name, accel.m_value);
 
         // Add accel parameters
         if !accel.additional_args.is_empty() {

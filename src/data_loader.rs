@@ -6,6 +6,7 @@ use datafusion::arrow::datatypes::{
 };
 use datafusion::arrow::record_batch::RecordBatch;
 
+use datafusion::functions::core::expr_ext::FieldAccessor;
 use datafusion::logical_expr::{col, lit};
 use datafusion::prelude::*;
 
@@ -90,51 +91,31 @@ pub struct Filters {
     pub series_params: HashMap<String, HashSet<String>>,
 }
 
-// Check if parameters match the filters (handling k=null case)
-fn params_match_filters(
-    params: &HashMap<String, String>,
-    filters: &HashMap<String, HashSet<String>>,
-) -> bool {
-    // If no filters are set, everything matches
-    if filters.is_empty() {
-        return true;
-    }
+// Build DataFusion filter expressions for struct field parameters
+fn filter_params(col_name: &str, filters: &HashMap<String, HashSet<String>>) -> Option<Expr> {
+    let mut fin: Option<Expr> = None;
 
-    // Check if any filter has actual values (not empty sets)
-    let has_active_filters = filters.values().any(|set| !set.is_empty());
-    if !has_active_filters {
-        return true;
-    }
-
-    for (param_name, filter_values) in filters {
-        // Skip empty filter sets
-        if filter_values.is_empty() {
-            continue;
+    for (arg, values) in filters {
+        let mut curr: Option<Expr> = None;
+        for value in values {
+            let f = col(col_name).field(arg).eq(lit(value));
+            curr = Some(match curr {
+                None => f,
+                Some(curr) => curr.or(f),
+            });
         }
-
-        if let Some(param_value) = params.get(param_name) {
-            // Special case: if parameter value is "null" and filter is for "k"
-            // then it should match any filter value for "k"
-            if param_name == "k" && param_value == "null" {
-                continue; // k=null matches any filter for k
-            }
-
-            // Parameter exists, check if its value is in the filter set
-            if !filter_values.contains(param_value) {
-                return false;
-            }
-        } else {
-            // Parameter doesn't exist in this record
-            // Check if "null" is in the filter values - if so, this matches
-            // Otherwise, this record doesn't match
-            if !filter_values.contains("null") {
-                return false;
-            }
+        if let Some(mut curr) = curr {
+            curr = curr.or(col(col_name).field(arg).is_null());
+            fin = Some(match fin {
+                None => curr,
+                Some(fin) => fin.and(curr),
+            });
         }
     }
 
-    true
+    fin
 }
+
 // Core
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct ComplexNumber {
@@ -348,6 +329,7 @@ fn to_accel_point<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<Option<AccelPo
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SeriesRecord {
+    pub precision: String,
     pub series_id: i32,
     pub name: String,
     pub arguments: HashMap<String, String>,
@@ -556,7 +538,10 @@ impl DataLoader {
 
         Ok(res)
     }
+}
 
+// Filtering
+impl DataLoader {
     async fn load_accelerations_for_multiple_series(
         &self,
         series_ids: &[i32],
@@ -597,6 +582,11 @@ impl DataLoader {
                 filter_expr = filter_expr.or(col("m_value").eq(lit(*m)));
             }
             df = df.filter(filter_expr)?;
+        }
+
+        // Apply accel_params filters using SQL
+        if let Some(param_filter) = filter_params("additional_args", &filters.accel_params) {
+            df = df.filter(param_filter)?;
         }
         #[cfg(feature = "perf_tracing")]
         let filter_time = filter_start.elapsed();
@@ -662,11 +652,6 @@ impl DataLoader {
                 let m_value = m_value.context("m_value is null")? as i32;
                 let additional_args = additional_args;
 
-                // Apply accel_params filtering
-                if !params_match_filters(&additional_args, &filters.accel_params) {
-                    continue;
-                }
-
                 let accel_record = AccelRecord {
                     accel_info: AccelInfo {
                         name: accel_name,
@@ -730,6 +715,11 @@ impl DataLoader {
             df = df.filter(filter_expr)?;
         }
 
+        // Apply series_params filters using SQL
+        if let Some(param_filter) = filter_params("arguments", &filters.series_params) {
+            df = df.filter(param_filter)?;
+        }
+
         #[cfg(feature = "perf_tracing")]
         let query_start = Instant::now();
         let batches: Vec<RecordBatch> = df.collect().await?;
@@ -743,6 +733,12 @@ impl DataLoader {
 
         // First, collect all series records and series_ids
         for batch in batches {
+            let precision = to_str(
+                "precision",
+                batch
+                    .column_by_name("precision")
+                    .context("No precision in series")?,
+            )?;
             let series_id = to_i64(
                 "series_id",
                 batch
@@ -777,25 +773,24 @@ impl DataLoader {
                 |x| to_point("computed.[]", x),
             )?;
 
-            for ((((series_id, series_name), arguments), series_limit), computed) in series_id
-                .into_iter()
-                .zip(series_name)
-                .zip(arguments)
-                .zip(series_limit)
-                .zip(computed)
+            for (((((precision, series_id), series_name), arguments), series_limit), computed) in
+                precision
+                    .into_iter()
+                    .zip(series_id)
+                    .zip(series_name)
+                    .zip(arguments)
+                    .zip(series_limit)
+                    .zip(computed)
             {
+                let precision = precision.context("precision is null")?.to_string();
                 let series_id = series_id.context("series_id is null")? as i32;
                 let series_name = series_name.context("name is null")?.to_string();
                 let arguments = arguments;
                 let computed = computed.context("computed is null")?;
 
-                // Apply series_params filtering
-                if !params_match_filters(&arguments, &filters.series_params) {
-                    continue;
-                }
-
                 series_ids.push(series_id);
                 series_records.push(SeriesRecord {
+                    precision,
                     series_id,
                     name: series_name,
                     arguments,
@@ -842,247 +837,3 @@ impl DataLoader {
         Ok(result)
     }
 }
-
-//     pub async fn filter_data(&self, filters: &Filters) -> Result<Vec<DataItem>> {
-//     }
-
-//     async fn load_accelerations_for_series(
-//         &self,
-//         series: &SeriesInfo,
-//         filters: &Filters,
-//     ) -> Result<Vec<AccelRecord>> {
-//         let mut df = self.ctx.table("accelerations").await?;
-
-//         // Filter by series_id
-//         df = df.filter(col("series_id").eq(lit(series.series_id)))?;
-
-//         // Apply accel filters
-//         if !filters.base_accel.is_empty() {
-//             let mut filter_expr =
-//                 col("accel_name").eq(lit(filters.base_accel.iter().next().unwrap().clone()));
-//             for a in filters.base_accel.iter().skip(1) {
-//                 filter_expr = filter_expr.or(col("accel_name").eq(lit(a.clone())));
-//             }
-//             df = df.filter(filter_expr)?;
-//         }
-
-//         let batches: Vec<RecordBatch> = df
-//             .collect()
-//             .await
-//             .map_err(|e| anyhow::anyhow!("Failed to execute accelerations query: {}", e))?;
-
-//         let mut accel_records = Vec::new();
-//         for batch in batches {
-//             for row_idx in 0..batch.num_rows() {
-//                 if let Ok(record) = self.row_to_accel_record(&batch, row_idx) {
-//                     accel_records.push(record);
-//                 }
-//             }
-//         }
-
-//         Ok(accel_records)
-//     }
-
-//     fn row_to_series_info(&self, batch: &RecordBatch, row_idx: usize) -> Result<SeriesInfo> {
-//         let series_id_col = batch.column_by_name("series_id").unwrap();
-//         let series_id_array = series_id_col.as_any().downcast_ref::<Int64Array>().unwrap();
-//         let series_id = series_id_array.value(row_idx) as i32;
-
-//         let series_name_col = batch.column_by_name("series_name").unwrap();
-//         let series_name = Self::extract_string_from_array(series_name_col, row_idx)?;
-
-//         // Parse arguments struct
-//         let arguments_col = batch.column_by_name("arguments").unwrap();
-//         let arguments_struct = arguments_col
-//             .as_any()
-//             .downcast_ref::<StructArray>()
-//             .unwrap();
-//         let arguments = self.extract_string_map_from_struct(arguments_struct, row_idx)?;
-
-//         // Parse series_limit struct
-//         let series_limit_col = batch.column_by_name("series_limit").unwrap();
-//         let series_limit_struct = series_limit_col
-//             .as_any()
-//             .downcast_ref::<StructArray>()
-//             .unwrap();
-//         let series_limit = self.extract_complex_from_struct(series_limit_struct, row_idx)?;
-
-//         // Parse computed list
-//         let computed_col = batch.column_by_name("computed").unwrap();
-//         let computed_list = computed_col.as_any().downcast_ref::<ListArray>().unwrap();
-//         let computed = self.extract_computed_values_from_list(computed_list, row_idx)?;
-
-//         Ok(SeriesInfo {
-//             series_id,
-//             name: series_name,
-//             arguments,
-//             series_limit,
-//             computed,
-//         })
-//     }
-
-//     fn row_to_accel_record(&self, batch: &RecordBatch, row_idx: usize) -> Result<AccelRecord> {
-//         let accel_name_col = batch.column_by_name("accel_name").unwrap();
-//         let accel_name = Self::extract_string_from_array(accel_name_col, row_idx)?;
-
-//         let m_value_col = batch.column_by_name("m_value").unwrap();
-//         let m_value_array = m_value_col.as_any().downcast_ref::<Int64Array>().unwrap();
-//         let m_value = m_value_array.value(row_idx) as i32;
-
-//         // Parse additional_args (may be null)
-//         let additional_args =
-//             if let Some(additional_args_col) = batch.column_by_name("additional_args") {
-//                 if let Some(additional_args_struct) =
-//                     additional_args_col.as_any().downcast_ref::<StructArray>()
-//                 {
-//                     self.extract_string_map_from_struct(additional_args_struct, row_idx)?
-//                 } else {
-//                     HashMap::new()
-//                 }
-//             } else {
-//                 HashMap::new()
-//             };
-
-//         // Parse computed list
-//         let computed_col = batch.column_by_name("computed").unwrap();
-//         let computed_list = computed_col.as_any().downcast_ref::<ListArray>().unwrap();
-//         let computed = self.extract_complex_list_from_list(computed_list, row_idx)?;
-
-//         let accel_info = AccelInfo {
-//             name: accel_name,
-//             m_value,
-//             additional_args,
-//         };
-
-//         Ok(AccelRecord {
-//             accel_info,
-//             computed,
-//         })
-//     }
-
-//     fn parse_complex_number(&self, value: &str) -> Result<ComplexNumber> {
-//         let value = value.trim();
-
-//         // Handle complex numbers in format "real + imag * i" or "real - imag * i"
-//         let re = Regex::new(
-//             r"^([+-]?\d*\.?\d+(?:[eE][+-]?\d+)?)\s*([+-])\s*(\d*\.?\d+(?:[eE][+-]?\d+)?)\s*\*\s*i$",
-//         )?;
-
-//         if let Some(caps) = re.captures(value) {
-//             let real = caps[1].parse::<f64>()?;
-//             let imag_sign = if &caps[2] == "-" { -1.0 } else { 1.0 };
-//             let imag = caps[3].parse::<f64>()? * imag_sign;
-//             return Ok(ComplexNumber { real, imag });
-//         }
-
-//         // Handle simple real numbers (including scientific notation)
-//         if let Ok(real) = value.parse::<f64>() {
-//             return Ok(ComplexNumber { real, imag: 0.0 });
-//         }
-
-//         // Try to extract number using regex for complex cases
-//         let simple_re = Regex::new(r"([+-]?\d*\.?\d+(?:[eE][+-]?\d+)?)")?;
-//         if let Some(caps) = simple_re.captures(value) {
-//             let real = caps[1].parse::<f64>()?;
-//             return Ok(ComplexNumber { real, imag: 0.0 });
-//         }
-
-//         Err(anyhow::anyhow!("Could not parse complex number: {}", value))
-//     }
-
-//     fn extract_string_map_from_struct(
-//         &self,
-//         struct_array: &StructArray,
-//         row_idx: usize,
-//     ) -> Result<HashMap<String, String>> {
-//         let mut map = HashMap::new();
-//         for (field_idx, field_name) in struct_array.column_names().iter().enumerate() {
-//             let field_array = struct_array.column(field_idx);
-//             let value = Self::extract_string_from_array(field_array, row_idx)?;
-//             map.insert(field_name.to_string(), value);
-//         }
-//         Ok(map)
-//     }
-
-//     fn extract_complex_from_struct(
-//         &self,
-//         struct_array: &StructArray,
-//         row_idx: usize,
-//     ) -> Result<ComplexNumber> {
-//         let real_col = struct_array.column_by_name("real").unwrap();
-//         let real_str = Self::extract_string_from_array(real_col, row_idx)?;
-
-//         let imag_col = struct_array.column_by_name("imag").unwrap();
-//         let imag_str = Self::extract_string_from_array(imag_col, row_idx)?;
-
-//         Ok(ComplexNumber {
-//             real: real_str.parse::<f64>().unwrap_or(0.0),
-//             imag: imag_str.parse::<f64>().unwrap_or(0.0),
-//         })
-//     }
-
-//     fn extract_computed_values_from_list(
-//         &self,
-//         list_array: &ListArray,
-//         row_idx: usize,
-//     ) -> Result<Vec<ComputedValue>> {
-//         let mut computed_values = Vec::new();
-//         let value = list_array.value(row_idx);
-//         if let Some(struct_array) = value.as_any().downcast_ref::<StructArray>() {
-//             for i in 0..struct_array.len() {
-//                 if let Ok(computed_value) = self.extract_single_computed_value(struct_array, i) {
-//                     computed_values.push(computed_value);
-//                 }
-//             }
-//         }
-//         Ok(computed_values)
-//     }
-
-//     fn extract_complex_list_from_list(
-//         &self,
-//         list_array: &ListArray,
-//         row_idx: usize,
-//     ) -> Result<Vec<ComplexNumber>> {
-//         let mut complex_values = Vec::new();
-//         let value = list_array.value(row_idx);
-//         if let Some(struct_array) = value.as_any().downcast_ref::<StructArray>() {
-//             for i in 0..struct_array.len() {
-//                 if let Ok(complex) = self.extract_complex_from_struct(struct_array, i) {
-//                     complex_values.push(complex);
-//                 }
-//             }
-//         }
-//         Ok(complex_values)
-//     }
-
-//     fn extract_single_computed_value(
-//         &self,
-//         struct_array: &StructArray,
-//         row_idx: usize,
-//     ) -> Result<ComputedValue> {
-//         let mut n = 0;
-//         let mut value = ComplexNumber {
-//             real: 0.0,
-//             imag: 0.0,
-//         };
-
-//         for (field_idx, field_name) in struct_array.column_names().iter().enumerate() {
-//             let field_array = struct_array.column(field_idx);
-//             match *field_name {
-//                 "n" => {
-//                     if let Some(int_array) = field_array.as_any().downcast_ref::<Int64Array>() {
-//                         n = int_array.value(row_idx) as i32;
-//                     }
-//                 }
-//                 "value" => {
-//                     if let Some(value_struct) = field_array.as_any().downcast_ref::<StructArray>() {
-//                         value = self.extract_complex_from_struct(value_struct, row_idx)?;
-//                     }
-//                 }
-//                 _ => {}
-//             }
-//         }
-
-//         Ok(ComputedValue { n, value })
-//     }
-// }
