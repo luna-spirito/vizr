@@ -1,14 +1,17 @@
 use anyhow::{Context, Result, anyhow};
-use datafusion::arrow::array::*;
-
-use datafusion::arrow::datatypes::{
-    Int8Type, Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+use datafusion::{
+    arrow::{
+        array::*,
+        datatypes::{
+            DataType, Int8Type, Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type, UInt32Type,
+            UInt64Type,
+        },
+        record_batch::RecordBatch,
+    },
+    functions::core::expr_ext::FieldAccessor,
+    logical_expr::{col, lit},
+    prelude::*,
 };
-use datafusion::arrow::record_batch::RecordBatch;
-
-use datafusion::functions::core::expr_ext::FieldAccessor;
-use datafusion::logical_expr::{col, lit};
-use datafusion::prelude::*;
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -127,6 +130,45 @@ pub struct ComplexNumber {
 pub struct Point {
     pub n: i32,
     pub value: ComplexNumber,
+}
+
+// Parse logarithmic value from string, exploiting scientific notation when possible
+fn parse_logarithmic_value(s: &str) -> Result<f64> {
+    if s.is_empty() {
+        return Ok(f64::NEG_INFINITY);
+    }
+
+    // Check for scientific notation (e or E)
+    if let Some(e_pos) = s.find(['e', 'E']) {
+        let mantissa_str = &s[..e_pos];
+        let exponent_str = &s[e_pos + 1..];
+
+        // Parse mantissa and exponent
+        let mantissa: f64 = mantissa_str
+            .parse()
+            .with_context(|| format!("Failed to parse mantissa: {}", mantissa_str))?;
+        let exponent: i32 = exponent_str
+            .parse()
+            .with_context(|| format!("Failed to parse exponent: {}", exponent_str))?;
+
+        // For scientific notation: log10(mantissa * 10^exponent) = log10(mantissa) + exponent
+        if mantissa <= 0.0 {
+            return Ok(f64::NEG_INFINITY);
+        }
+
+        Ok(mantissa.log10() + exponent as f64)
+    } else {
+        // Regular number - parse and compute log10
+        let value: f64 = s
+            .parse()
+            .with_context(|| format!("Failed to parse number: {}", s))?;
+
+        if value <= 0.0 {
+            return Ok(f64::NEG_INFINITY);
+        }
+
+        Ok(value.log10())
+    }
 }
 
 // to_x
@@ -305,15 +347,17 @@ fn to_accel_point<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<Option<AccelPo
         if let (Some(value), Some(deviation)) =
             (v.column_by_name("value"), v.column_by_name("deviation"))
         {
-            if let (Ok(value), Ok(deviation)) = (to_complex("", value), to_complex("", deviation)) {
+            if let (Ok(value), Ok(deviation)) = (to_complex("", value), to_str("", deviation)) {
                 let mut res = Vec::new();
                 for (i, (value, deviation)) in value.into_iter().zip(deviation).enumerate() {
                     res.push(if v.is_null(i) {
                         None
                     } else {
+                        let deviation_str = deviation.context("no deviation in accel point")?;
+                        let log_deviation = parse_logarithmic_value(deviation_str)?;
                         Some(AccelPoint {
                             value: value.context("no value in accel point")?,
-                            deviation: deviation.context("no deviation in accel point")?,
+                            deviation: log_deviation,
                         })
                     });
                 }
@@ -322,7 +366,7 @@ fn to_accel_point<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<Option<AccelPo
         }
     }
     Err(anyhow!(
-        "Expected `{name}` to be {{ value: {{ real: str, imag: str }}, deviation: {{ real: str, imag: str }} }}, found {}",
+        "Expected `{name}` to be {{ value: {{ real: str, imag: str }}, deviation: str }}, found {}",
         v.data_type()
     ))
 }
@@ -347,7 +391,7 @@ pub struct AccelInfo {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct AccelPoint {
     pub value: ComplexNumber,
-    pub deviation: ComplexNumber,
+    pub deviation: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -379,19 +423,17 @@ impl DataLoader {
         let ctx = SessionContext::new();
 
         // Register series table
-        let series_options = ParquetReadOptions::default().table_partition_cols(vec![(
-            "series_name".to_string(),
-            datafusion::arrow::datatypes::DataType::Utf8,
-        )]);
+        let series_options = ParquetReadOptions::default().table_partition_cols(vec![
+            ("precision".to_string(), DataType::Utf8),
+            ("series_name".to_string(), DataType::Utf8),
+        ]);
         ctx.register_parquet("series", &format!("{}/series", path), series_options)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to register series parquet: {}", e))?;
 
         // Register accelerations table
-        let accel_options = ParquetReadOptions::default().table_partition_cols(vec![(
-            "series_id".to_string(),
-            datafusion::arrow::datatypes::DataType::Int32,
-        )]);
+        let accel_options = ParquetReadOptions::default()
+            .table_partition_cols(vec![("series_id".to_string(), DataType::Int32)]);
         ctx.register_parquet(
             "accelerations",
             &format!("{}/accelerations", path),

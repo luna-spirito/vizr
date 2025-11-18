@@ -425,9 +425,8 @@ impl DashboardApp {
                         .zip(accel_record.computed.iter())
                         .filter_map(|(c, accel)| {
                             accel.map(|ap| {
-                                let error =
-                                    (ap.deviation.real.powi(2) + ap.deviation.imag.powi(2)).sqrt();
-                                [c.n as f64, (error + f64::EPSILON).ln()] // Log scale with epsilon
+                                let error = ap.deviation; // Already logarithmic
+                                [c.n as f64, error] // Direct use of logarithmic value
                             })
                         })
                         .collect();
@@ -485,8 +484,7 @@ impl DashboardApp {
 
                     for (c, accel) in series.computed.iter().zip(accel_record.computed.iter()) {
                         if let Some(ap) = accel {
-                            let error =
-                                (ap.deviation.real.powi(2) + ap.deviation.imag.powi(2)).sqrt();
+                            let error = ap.deviation; // Already logarithmic
 
                             if error < min_error {
                                 min_error = error;
@@ -498,7 +496,7 @@ impl DashboardApp {
                     if min_error < f64::INFINITY {
                         let point = PlotPoints::new(vec![[
                             min_error_iter as f64,
-                            (min_error + f64::EPSILON).ln(),
+                            min_error, // Already logarithmic
                         ]]);
                         point_series.push((item_name, point));
                     }
