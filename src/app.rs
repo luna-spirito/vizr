@@ -362,9 +362,10 @@ impl DashboardApp {
             let mut plot = Plot::new("convergence")
                 .allow_zoom(true)
                 .allow_drag(true)
-                .height(600.0)
+                .height(900.0)
                 .x_axis_label("Итерация n")
-                .y_axis_label("Значение");
+                .y_axis_label("Значение")
+                .legend(egui_plot::Legend::default());
 
             // Set fixed Y bounds [-10, 10] and calculate X bounds for 1:1 aspect ratio
             if min_x != f64::INFINITY && max_x != f64::NEG_INFINITY {
@@ -447,9 +448,10 @@ impl DashboardApp {
             let plot = Plot::new("error")
                 .allow_zoom(true)
                 .allow_drag(true)
-                .height(400.0)
+                .height(900.0)
                 .x_axis_label("Итерация n")
                 .y_axis_label("Абсолютная ошибка (log)")
+                .legend(egui_plot::Legend::default())
                 .show(ui, |plot_ui| {
                     // Add horizontal line at -1000 with tooltip
                     if min_x != f64::INFINITY && max_x != f64::NEG_INFINITY {
@@ -527,9 +529,10 @@ impl DashboardApp {
             let plot = Plot::new("performance")
                 .allow_zoom(true)
                 .allow_drag(true)
-                .height(400.0)
+                .height(900.0)
                 .x_axis_label("Итерация достижения минимальной ошибки")
                 .y_axis_label("Минимальная ошибка (log)")
+                .legend(egui_plot::Legend::default())
                 .show(ui, |plot_ui| {
                     // Add horizontal line at -1000 with tooltip
                     if min_x != f64::INFINITY && max_x != f64::NEG_INFINITY {

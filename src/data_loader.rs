@@ -542,6 +542,7 @@ impl DataLoader {
             stats.metadata_processing_time += processing_time;
         }
 
+        res.sort();
         Ok(res)
     }
 
