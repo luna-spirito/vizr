@@ -133,6 +133,19 @@ pub struct Point {
     pub value: ComplexNumber,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErrorInfo {
+    pub n: i32,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventInfo {
+    pub n: i32,
+    pub name: String,
+    pub description: String,
+}
+
 fn parse_scientific(s: &str) -> Result<Scientific> {
     // Check for scientific notation (e or E)
     if let Some(e_pos) = s.find(['e', 'E']) {
@@ -329,6 +342,56 @@ fn to_point<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<Point>> {
     ))
 }
 
+fn to_error_info<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<ErrorInfo>> {
+    if let Some(v) = v.as_struct_opt() {
+        if let (Some(n), Some(message)) = (
+            v.column_by_name("n"),
+            v.column_by_name("message"),
+        ) {
+            if let (Ok(n), Ok(message)) = (to_i64("", n), to_str("", message)) {
+                let mut res = Vec::new();
+                for (n, message) in n.into_iter().zip(message) {
+                    res.push(ErrorInfo {
+                        n: n.context("n not provided")? as i32,
+                        message: message.context("message not provided")?.to_string(),
+                    })
+                }
+                return Ok(res);
+            }
+        }
+    }
+    Err(anyhow!(
+        "Expected `{name}` to be {{ n: int, message: str }}, found {}",
+        v.data_type()
+    ))
+}
+
+fn to_event_info<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<EventInfo>> {
+    if let Some(v) = v.as_struct_opt() {
+        if let (Some(n), Some(name_field), Some(description)) = (
+            v.column_by_name("n"),
+            v.column_by_name("name"),
+            v.column_by_name("description"),
+        ) {
+            if let (Ok(n), Ok(name_field), Ok(description)) = (to_i64("", n), to_str("", name_field), to_str("", description)) {
+                let mut res = Vec::new();
+                for ((n, name_field), description) in n.into_iter().zip(name_field).zip(description) {
+                    res.push(EventInfo {
+                        n: n.context("n not provided")? as i32,
+                        name: name_field.context("name not provided")?.to_string(),
+                        description: description.context("description not provided")?.to_string(),
+                    })
+                }
+                return Ok(res);
+            }
+        }
+    }
+    Err(anyhow!(
+        "Expected `{name}` to be {{ n: int, name: str, description: str }}, found {}",
+        v.data_type()
+    ))
+}
+
 fn to_accel_point<'a>(
     name: &str,
     v: &'a dyn Array,
@@ -394,6 +457,8 @@ pub struct AccelPoint {
 pub struct AccelRecord {
     pub accel_info: AccelInfo,
     pub computed: Vec<Option<AccelPoint>>,
+    pub errors: Vec<ErrorInfo>,
+    pub events: Vec<EventInfo>,
 }
 
 pub type DataItem = (SeriesRecord, Vec<AccelRecord>);
@@ -680,12 +745,32 @@ impl DataLoader {
                 |x| to_accel_point("computed.[]", x, symlog),
             )?;
 
-            for ((((series_id, accel_name), m_value), additional_args), computed) in series_id
+            let errors = if let Some(col) = batch.column_by_name("errors") {
+                to_list("errors", col, |x| to_error_info("errors.[]", x))?
+                    .into_iter()
+                    .map(|opt| opt.unwrap_or_default())
+                    .collect()
+            } else {
+                vec![Vec::new(); batch.num_rows()]
+            };
+
+            let events = if let Some(col) = batch.column_by_name("events") {
+                to_list("events", col, |x| to_event_info("events.[]", x))?
+                    .into_iter()
+                    .map(|opt| opt.unwrap_or_default())
+                    .collect()
+            } else {
+                vec![Vec::new(); batch.num_rows()]
+            };
+
+            for ((((((series_id, accel_name), m_value), additional_args), computed), errors), events) in series_id
                 .into_iter()
                 .zip(accel_name)
                 .zip(m_value)
                 .zip(additional_args)
                 .zip(computed)
+                .zip(errors)
+                .zip(events)
             {
                 let series_id = series_id.context("series_id is null")? as i32;
                 let accel_name = accel_name.context("accel_name is null")?.to_string();
@@ -699,6 +784,8 @@ impl DataLoader {
                         additional_args,
                     },
                     computed: computed.context("computed is null")?,
+                    errors,
+                    events,
                 };
 
                 result.entry(series_id).or_default().push(accel_record);

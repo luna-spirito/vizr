@@ -1,7 +1,9 @@
 use crate::data_loader::{AccelRecord, DataItem, DataLoader, Filters, SeriesRecord};
+// use egui_extras::{Column, TableBuilder};
 use crate::symlog::symlog_formatter;
 use anyhow::Result;
 use eframe::egui;
+
 use egui_plot::{Line, MarkerShape, Plot, PlotPoints, Points};
 use std::collections::HashMap;
 use std::sync::{Arc, mpsc};
@@ -536,6 +538,67 @@ impl Viz {
                 self.request_screenshot(ui.ctx(), "performance", plot.response.rect);
             }
         });
+    }
+
+    fn create_accel_records_table(&mut self, ui: &mut egui::Ui, data: &[DataItemRef]) {
+        if data.is_empty() {
+            ui.label("Нет данных для отображения");
+            return;
+        }
+
+        // Collect all accel records
+        let mut all_records = Vec::new();
+        for (series, accel_records) in data {
+            for accel_record in accel_records {
+                all_records.push((series, accel_record));
+            }
+        }
+
+        if all_records.is_empty() {
+            ui.label("Нет записей об ускорениях");
+            return;
+        }
+
+        // Set spacing for spacious cells
+        ui.spacing_mut().item_spacing = egui::vec2(20.0, 10.0);
+
+        // Create grid
+        egui::Grid::new("accel_table")
+            .striped(true)
+            .show(ui, |ui| {
+                // Header row
+                ui.label(egui::RichText::new("Series ID").strong());
+                ui.label(egui::RichText::new("Series Name").strong());
+                ui.label(egui::RichText::new("Precision").strong());
+                ui.label(egui::RichText::new("Accel Name").strong());
+                ui.label(egui::RichText::new("M Value").strong());
+                ui.label(egui::RichText::new("Computed n's").strong());
+                ui.label(egui::RichText::new("Errors").strong());
+                ui.label(egui::RichText::new("Events").strong());
+                ui.end_row();
+
+            // Data rows
+            for (i, &(series, accel_record)) in all_records.iter().enumerate() {
+                ui.add(egui::Label::new(series.series_id.to_string()).wrap(true));
+                ui.add(egui::Label::new(&series.name).wrap(true));
+                ui.add(egui::Label::new(&series.precision).wrap(true));
+                ui.add(egui::Label::new(&accel_record.accel_info.name).wrap(true));
+                ui.add(egui::Label::new(accel_record.accel_info.m_value.to_string()).wrap(true));
+                let computed_ns: Vec<String> = accel_record.computed.iter().enumerate().filter_map(|(j, c)| c.as_ref().map(|_| j.to_string())).collect();
+                ui.add(egui::Label::new(computed_ns.join(", ")).wrap(true));
+                ui.collapsing(format!("Errors ({}) - Row {}", accel_record.errors.len(), i), |ui| {
+                    for error in &accel_record.errors {
+                        ui.label(format!("n={}: {}", error.n, error.message));
+                    }
+                });
+                ui.collapsing(format!("Events ({}) - Row {}", accel_record.events.len(), i), |ui| {
+                    for event in &accel_record.events {
+                        ui.label(format!("n={}: {} - {}", event.n, event.name, event.description));
+                    }
+                });
+                ui.end_row();
+            }
+            });
     }
 }
 
@@ -1105,6 +1168,11 @@ impl eframe::App for DashboardApp {
                     // Performance plot
                     ui.collapsing("Производительность методов", |ui| {
                         self.viz.create_performance_plot(ui, &data, *symlog);
+                    });
+
+                    // AccelRecords table
+                    ui.collapsing("Таблица ускорений", |ui| {
+                        self.viz.create_accel_records_table(ui, &data);
                     });
                 } else if self.loading {
                     ui.centered_and_justified(|ui| {
