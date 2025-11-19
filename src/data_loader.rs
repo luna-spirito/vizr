@@ -13,12 +13,15 @@ use datafusion::{
     logical_expr::{col, lit},
     prelude::*,
 };
-
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::iter;
 #[cfg(feature = "perf_tracing")]
 use std::{sync::Mutex, time::Instant};
+
+// NOTE: Currently, it allows accepts entries with values _default/-1. Why? Because DataFusion doesn't like vision and doesn't like singular
+// .eq queries over partitioned dataset. We don't know why, it works perfectly on windows.
+// By the way, in_list also crashed on Windows.
 
 // Global timing tracking (only enabled with perf_tracing feature)
 #[cfg(feature = "perf_tracing")]
@@ -104,7 +107,7 @@ fn filter_params(col_name: &str, filters: &HashMap<String, HashSet<String>>) -> 
         for value in values {
             let f = col(col_name).field(arg).eq(lit(value));
             curr = Some(match curr {
-                None => f,
+                None => f.or(col(col_name).eq(lit("_default"))), // ugly fix
                 Some(curr) => curr.or(f),
             });
         }
@@ -344,10 +347,7 @@ fn to_point<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<Point>> {
 
 fn to_error_info<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<ErrorInfo>> {
     if let Some(v) = v.as_struct_opt() {
-        if let (Some(n), Some(message)) = (
-            v.column_by_name("n"),
-            v.column_by_name("message"),
-        ) {
+        if let (Some(n), Some(message)) = (v.column_by_name("n"), v.column_by_name("message")) {
             if let (Ok(n), Ok(message)) = (to_i64("", n), to_str("", message)) {
                 let mut res = Vec::new();
                 for (n, message) in n.into_iter().zip(message) {
@@ -373,9 +373,14 @@ fn to_event_info<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<EventInfo>> {
             v.column_by_name("name"),
             v.column_by_name("description"),
         ) {
-            if let (Ok(n), Ok(name_field), Ok(description)) = (to_i64("", n), to_str("", name_field), to_str("", description)) {
+            if let (Ok(n), Ok(name_field), Ok(description)) = (
+                to_i64("", n),
+                to_str("", name_field),
+                to_str("", description),
+            ) {
                 let mut res = Vec::new();
-                for ((n, name_field), description) in n.into_iter().zip(name_field).zip(description) {
+                for ((n, name_field), description) in n.into_iter().zip(name_field).zip(description)
+                {
                     res.push(EventInfo {
                         n: n.context("n not provided")? as i32,
                         name: name_field.context("name not provided")?.to_string(),
@@ -661,11 +666,9 @@ impl DataLoader {
         // Filter by series_ids
         #[cfg(feature = "perf_tracing")]
         let filter_start = Instant::now();
-        if series_ids.len() == 1 {
-            df = df.filter(col("series_id").eq(lit(series_ids[0])))?;
-        } else {
-            let mut filter_expr = col("series_id").eq(lit(series_ids[0]));
-            for &series_id in series_ids.iter().skip(1) {
+        {
+            let mut filter_expr = col("series_id").eq(lit(-1));
+            for &series_id in series_ids.iter() {
                 filter_expr = filter_expr.or(col("series_id").eq(lit(series_id)));
             }
             df = df.filter(filter_expr)?;
@@ -673,17 +676,16 @@ impl DataLoader {
 
         // Apply accel filters
         if !filters.base_accel.is_empty() {
-            let mut filter_expr =
-                col("accel_name").eq(lit(filters.base_accel.iter().next().unwrap().clone()));
-            for a in filters.base_accel.iter().skip(1) {
+            let mut filter_expr = col("accel_name").eq(lit("_default"));
+            for a in filters.base_accel.iter() {
                 filter_expr = filter_expr.or(col("accel_name").eq(lit(a.clone())));
             }
             df = df.filter(filter_expr)?;
         }
 
         if !filters.m_values.is_empty() {
-            let mut filter_expr = col("m_value").eq(lit(*filters.m_values.iter().next().unwrap()));
-            for m in filters.m_values.iter().skip(1) {
+            let mut filter_expr = col("m_value").eq(lit("_default"));
+            for m in filters.m_values.iter() {
                 filter_expr = filter_expr.or(col("m_value").eq(lit(*m)));
             }
             df = df.filter(filter_expr)?;
@@ -763,7 +765,10 @@ impl DataLoader {
                 vec![Vec::new(); batch.num_rows()]
             };
 
-            for ((((((series_id, accel_name), m_value), additional_args), computed), errors), events) in series_id
+            for (
+                (((((series_id, accel_name), m_value), additional_args), computed), errors),
+                events,
+            ) in series_id
                 .into_iter()
                 .zip(accel_name)
                 .zip(m_value)
@@ -826,18 +831,16 @@ impl DataLoader {
 
         // Apply series filters
         if !filters.precisions.is_empty() {
-            let mut filter_expr =
-                col("precision").eq(lit(filters.precisions.iter().next().unwrap().clone()));
-            for p in filters.precisions.iter().skip(1) {
+            let mut filter_expr = col("precision").eq(lit("_default"));
+            for p in filters.precisions.iter() {
                 filter_expr = filter_expr.or(col("precision").eq(lit(p.clone())));
             }
             df = df.filter(filter_expr)?;
         }
 
         if !filters.base_series.is_empty() {
-            let mut filter_expr =
-                col("series_name").eq(lit(filters.base_series.iter().next().unwrap().clone()));
-            for s in filters.base_series.iter().skip(1) {
+            let mut filter_expr = col("series_name").eq(lit("_default"));
+            for s in filters.base_series.iter() {
                 filter_expr = filter_expr.or(col("series_name").eq(lit(s.clone())));
             }
             df = df.filter(filter_expr)?;
