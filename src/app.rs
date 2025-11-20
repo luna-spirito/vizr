@@ -1,5 +1,4 @@
 use crate::data_loader::{AccelRecord, DataItem, DataLoader, Filters, SeriesRecord};
-// use egui_extras::{Column, TableBuilder};
 use crate::symlog::symlog_formatter;
 use anyhow::Result;
 use eframe::egui;
@@ -86,6 +85,7 @@ pub struct Viz {
     show_limits: bool,
     show_imaginary: bool,
     force_show_imaginary: bool,
+    symlog: bool,
 
     // Screenshot functionality
     pending_screenshots: HashMap<&'static str, egui::Rect>,
@@ -266,7 +266,7 @@ impl Viz {
                 let partial_points: PlotPoints = series
                     .computed
                     .iter()
-                    .map(|c| [c.n as f64, c.value.real])
+                    .map(|c| [c.n as f64, c.value.real.approx_f64()])
                     .collect();
 
                 lines.push(
@@ -281,12 +281,12 @@ impl Viz {
                 // Imaginary partial sums
                 let show_imag_partial = self.show_imaginary
                     && (self.force_show_imaginary
-                        || series.computed.iter().any(|c| c.value.imag.abs() > 0.0));
+                        || series.computed.iter().any(|c| c.value.imag.0.abs() > 0.0));
                 if show_imag_partial {
                     let imag_partial_points: PlotPoints = series
                         .computed
                         .iter()
-                        .map(|c| [c.n as f64, c.value.imag])
+                        .map(|c| [c.n as f64, c.value.imag.approx_f64()])
                         .collect();
 
                     lines.push(
@@ -309,8 +309,8 @@ impl Viz {
                     let max_x = x_range.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
                     // Real limit line
-                    let limit_points =
-                        PlotPoints::new(vec![[min_x, limit.real], [max_x, limit.real]]);
+                    let real_y = limit.real.approx_f64();
+                    let limit_points = PlotPoints::new(vec![[min_x, real_y], [max_x, real_y]]);
                     lines.push(
                         Line::new(limit_points)
                             .name(format!(
@@ -323,11 +323,11 @@ impl Viz {
 
                     // Imaginary limit line if enabled and either has imaginary part or force_show_imaginary is true
                     let show_imag_limit = self.show_imaginary
-                        && (self.force_show_imaginary || limit.imag.abs() > 0.0);
+                        && (self.force_show_imaginary || limit.imag.0.abs() > 0.0);
 
                     if show_imag_limit {
-                        let imag_points =
-                            PlotPoints::new(vec![[min_x, limit.imag], [max_x, limit.imag]]);
+                        let imag_y = limit.imag.approx_f64();
+                        let imag_points = PlotPoints::new(vec![[min_x, imag_y], [max_x, imag_y]]);
                         lines.push(
                             Line::new(imag_points)
                                 .name(format!(
@@ -359,7 +359,9 @@ impl Viz {
                     .computed
                     .iter()
                     .zip(accel_record.computed.iter())
-                    .filter_map(|(c, accel)| accel.map(|ap| [c.n as f64, ap.value.real]))
+                    .filter_map(|(c, accel)| {
+                        accel.map(|ap| [c.n as f64, ap.value.real.approx_f64()])
+                    })
                     .collect();
 
                 lines.push(Line::new(points).name(item_name.clone()));
@@ -370,13 +372,15 @@ impl Viz {
                         || accel_record
                             .computed
                             .iter()
-                            .any(|cn| cn.map_or(false, |ap| ap.value.imag.abs() > 0.0)));
+                            .any(|cn| cn.map_or(false, |ap| ap.value.imag.0.abs() > 0.0)));
                 if show_imag_accel {
                     let imag_points: PlotPoints = series
                         .computed
                         .iter()
                         .zip(accel_record.computed.iter())
-                        .filter_map(|(c, accel)| accel.map(|ap| [c.n as f64, ap.value.imag]))
+                        .filter_map(|(c, accel)| {
+                            accel.map(|ap| [c.n as f64, ap.value.imag.approx_f64()])
+                        })
                         .collect();
 
                     lines.push(
@@ -429,7 +433,7 @@ impl Viz {
         });
     }
 
-    fn create_error_plot(&mut self, ui: &mut egui::Ui, data: &[DataItemRef], symlog: bool) {
+    fn create_error_plot(&mut self, ui: &mut egui::Ui, data: &[DataItemRef]) {
         if data.is_empty() {
             ui.label("Нет данных для отображения");
             return;
@@ -454,7 +458,15 @@ impl Viz {
                     .computed
                     .iter()
                     .zip(accel_record.computed.iter())
-                    .filter_map(|(c, accel)| Some([c.n as f64, accel.as_ref()?.deviation]))
+                    .filter_map(|(c, accel)| {
+                        let deviation = accel.as_ref()?.deviation;
+                        let y = if self.symlog {
+                            deviation.symlog()
+                        } else {
+                            deviation.approx_f64()
+                        };
+                        Some([c.n as f64, y])
+                    })
                     .collect();
 
                 lines.push(Line::new(points).name(item_name));
@@ -466,9 +478,9 @@ impl Viz {
             .allow_drag(true)
             .height(900.0)
             .x_axis_label("Итерация n")
-            .y_axis_label("Абсолютная ошибка (log)")
+            .y_axis_label("Абсолютная ошибка")
             .legend(egui_plot::Legend::default());
-        if symlog {
+        if self.symlog {
             plot = plot.y_axis_formatter(|mark, _, _| symlog_formatter(mark.value));
         }
         let plot = plot.show(ui, |plot_ui| {
@@ -484,7 +496,7 @@ impl Viz {
         });
     }
 
-    fn create_performance_plot(&mut self, ui: &mut egui::Ui, data: &[DataItemRef], symlog: bool) {
+    fn create_performance_plot(&mut self, ui: &mut egui::Ui, data: &[DataItemRef]) {
         if data.is_empty() {
             ui.label("Нет данных для отображения");
             return;
@@ -512,7 +524,11 @@ impl Viz {
 
                 for (c, accel) in series.computed.iter().zip(accel_record.computed.iter()) {
                     if let Some(ap) = accel {
-                        let error = ap.deviation;
+                        let error = if self.symlog {
+                            ap.deviation.symlog()
+                        } else {
+                            ap.deviation.approx_f64()
+                        };
 
                         if error < min_error {
                             min_error = error;
@@ -522,10 +538,9 @@ impl Viz {
                 }
 
                 if min_error < f64::INFINITY {
-                    let clamped_error = min_error.max(-1000.0); // Clamp to -1000
                     min_x = min_x.min(min_error_iter as f64);
                     max_x = max_x.max(min_error_iter as f64);
-                    let point = PlotPoints::new(vec![[min_error_iter as f64, clamped_error]]);
+                    let point = PlotPoints::new(vec![[min_error_iter as f64, min_error]]);
                     point_series.push((item_name, point));
                 }
             }
@@ -538,7 +553,7 @@ impl Viz {
             .x_axis_label("Итерация достижения минимальной ошибки")
             .y_axis_label("Минимальная ошибка")
             .legend(egui_plot::Legend::default());
-        if symlog {
+        if self.symlog {
             plot = plot.y_axis_formatter(|mark, _, _| symlog_formatter(mark.value));
         }
         let plot = plot.show(ui, |plot_ui| {
@@ -588,13 +603,14 @@ impl Viz {
             .show(ui, |ui| {
                 // Header row
                 ui.label(egui::RichText::new("Series ID").strong());
-                ui.label(egui::RichText::new("Series Name").strong());
+                ui.label(egui::RichText::new("Название ряда").strong());
                 ui.label(egui::RichText::new("Precision").strong());
-                ui.label(egui::RichText::new("Accel Name").strong());
-                ui.label(egui::RichText::new("M Value").strong());
-                ui.label(egui::RichText::new("Computed n's").strong());
-                ui.label(egui::RichText::new("Errors").strong());
-                ui.label(egui::RichText::new("Events").strong());
+                ui.label(egui::RichText::new("Предел ряда").strong());
+                ui.label(egui::RichText::new("Название ускорения").strong());
+                ui.label(egui::RichText::new("M").strong());
+                ui.label(egui::RichText::new("Точки").strong());
+                ui.label(egui::RichText::new("Ошибки").strong());
+                ui.label(egui::RichText::new("Событий").strong());
                 ui.end_row();
 
                 // Data rows
@@ -602,6 +618,7 @@ impl Viz {
                     ui.add(egui::Label::new(series.series_id.to_string()).wrap(true));
                     ui.add(egui::Label::new(&series.name).wrap(true));
                     ui.add(egui::Label::new(&series.precision).wrap(true));
+                    ui.add(egui::Label::new(series.series_limit.format()).wrap(true));
                     ui.add(egui::Label::new(&accel_record.accel_info.name).wrap(true));
                     ui.add(
                         egui::Label::new(accel_record.accel_info.m_value.to_string()).wrap(true),
@@ -614,10 +631,10 @@ impl Viz {
                         .collect();
                     ui.add(egui::Label::new(computed_ns.join(", ")).wrap(true));
                     if accel_record.errors.is_empty() {
-                        ui.add(egui::Label::new("(no errors)").wrap(true));
+                        ui.add(egui::Label::new("(нет ошибок)").wrap(true));
                     } else {
                         ui.collapsing(
-                            format!("#{i}: {} errors", accel_record.errors.len()),
+                            format!("#{i}: {} ошибок", accel_record.errors.len()),
                             |ui| {
                                 for error in &accel_record.errors {
                                     ui.label(format!("n={}: {}", error.n, error.message));
@@ -626,10 +643,10 @@ impl Viz {
                         );
                     }
                     if accel_record.events.is_empty() {
-                        ui.add(egui::Label::new("(no events)").wrap(true));
+                        ui.add(egui::Label::new("(нет событий)").wrap(true));
                     } else {
                         ui.collapsing(
-                            format!("#{i}: {} events", accel_record.events.len()),
+                            format!("#{i}: {} событий", accel_record.events.len()),
                             |ui| {
                                 for event in &accel_record.events {
                                     ui.label(format!(
@@ -649,11 +666,10 @@ impl Viz {
 pub struct DashboardApp {
     loader: Arc<DataLoader>,
     filters: Filters,
-    data: Option<((Vec<DataItem>, bool), Filters, Filters)>,
+    data: Option<(Vec<DataItem>, Filters, Filters)>,
     // Каналы для асинхронной загрузки данных
-    data_sender: Option<mpsc::Sender<(Result<Vec<DataItem>>, bool)>>,
-    data_receiver: Option<mpsc::Receiver<(Result<Vec<DataItem>>, bool)>>,
-    symlog: bool,
+    data_sender: Option<mpsc::Sender<Result<Vec<DataItem>>>>,
+    data_receiver: Option<mpsc::Receiver<Result<Vec<DataItem>>>>,
     loading: bool,
     viz: Viz,
 }
@@ -661,20 +677,20 @@ pub struct DashboardApp {
 impl DashboardApp {
     pub fn new(loader: Arc<DataLoader>) -> Self {
         let (tx, rx) =
-            std::sync::mpsc::channel::<(std::result::Result<Vec<DataItem>, anyhow::Error>, bool)>();
+            std::sync::mpsc::channel::<std::result::Result<Vec<DataItem>, anyhow::Error>>();
         Self {
             loader,
             filters: Filters::default(),
             data: None,
             data_sender: Some(tx),
             data_receiver: Some(rx),
-            symlog: true,
             loading: false,
             viz: Viz {
                 show_partial_sums: true,
                 show_limits: true,
                 show_imaginary: true,
                 force_show_imaginary: false,
+                symlog: true,
                 pending_screenshots: HashMap::new(),
                 plot_hovered: false,
             },
@@ -685,15 +701,14 @@ impl DashboardApp {
         if let (Some(sender), _) = (&self.data_sender, &self.data_receiver) {
             let filters = self.filters.clone();
             let loader = self.loader.clone();
-            let symlog = self.symlog;
             let tx = sender.clone();
 
             // Запускаем загрузку в отдельном потоке
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 let result: std::result::Result<Vec<DataItem>, anyhow::Error> =
-                    rt.block_on(loader.filter_data(&filters, symlog));
-                let _ = tx.send((result, symlog));
+                    rt.block_on(loader.filter_data(&filters));
+                let _ = tx.send(result);
             });
 
             self.loading = true;
@@ -702,12 +717,12 @@ impl DashboardApp {
 
     fn check_for_data(&mut self) {
         if let Some(receiver) = &self.data_receiver {
-            if let Ok((result, symlog)) = receiver.try_recv() {
+            if let Ok(result) = receiver.try_recv() {
                 match result {
                     Ok(data) => {
                         let len = data.len();
                         let dynamic_filters = filterable(&data);
-                        self.data = Some(((data, symlog), dynamic_filters, Filters::default()));
+                        self.data = Some((data, dynamic_filters, Filters::default()));
                         println!("Loaded {} items after filtering", len);
                     }
                     Err(e) => {
@@ -1152,7 +1167,6 @@ impl eframe::App for DashboardApp {
                         &mut self.filters.accel_params,
                     );
                 });
-                ui.checkbox(&mut self.symlog, "Symlog");
 
                 ui.separator();
 
@@ -1162,6 +1176,7 @@ impl eframe::App for DashboardApp {
                 });
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Опции графиков:");
+                    ui.checkbox(&mut self.viz.symlog, "Symlog");
                     ui.checkbox(&mut self.viz.show_partial_sums, "Частичные суммы");
                     ui.checkbox(&mut self.viz.show_limits, "Пределы");
                     ui.checkbox(&mut self.viz.show_imaginary, "Мнимые части");
@@ -1186,14 +1201,14 @@ impl eframe::App for DashboardApp {
                         }
                     }
                     if let Some((ref data, _, _)) = self.data {
-                        ui.label(format!("Загружено рядов: {}", data.0.len()));
+                        ui.label(format!("Загружено рядов: {}", data.len()));
                     }
                 });
 
                 ui.add_space(20.0);
 
                 // Графики
-                if let Some(((data, symlog), available_dynamic_filters, selected_dynamic_filters)) =
+                if let Some((data, available_dynamic_filters, selected_dynamic_filters)) =
                     &mut self.data
                 {
                     // Dynamic filters section
@@ -1213,12 +1228,12 @@ impl eframe::App for DashboardApp {
 
                     // Error plot
                     ui.collapsing("Ошибка сходимости", |ui| {
-                        self.viz.create_error_plot(ui, &data, *symlog);
+                        self.viz.create_error_plot(ui, &data);
                     });
 
                     // Performance plot
                     ui.collapsing("Производительность методов", |ui| {
-                        self.viz.create_performance_plot(ui, &data, *symlog);
+                        self.viz.create_performance_plot(ui, &data);
                     });
 
                     // AccelRecords table

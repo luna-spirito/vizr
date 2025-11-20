@@ -126,8 +126,20 @@ fn filter_params(col_name: &str, filters: &HashMap<String, HashSet<String>>) -> 
 // Core
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct ComplexNumber {
-    pub real: f64,
-    pub imag: f64,
+    pub real: Scientific,
+    pub imag: Scientific,
+}
+
+impl ComplexNumber {
+    pub fn format(&self) -> String {
+        let real_str = self.real.format();
+        if self.imag.0.abs() > 0.0 {
+            let imag_str = self.imag.format();
+            format!("{real_str} + {imag_str}")
+        } else {
+            real_str
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -309,8 +321,11 @@ fn to_complex<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<Option<ComplexNumb
                         None
                     } else {
                         Some(ComplexNumber {
-                            real: real.context("real is null")?.parse()?,
-                            imag: imag.map(|x| x.parse()).transpose()?.unwrap_or(0.0),
+                            real: parse_scientific(real.context("real is null")?)?,
+                            imag: imag
+                                .map(|x| parse_scientific(x))
+                                .transpose()?
+                                .unwrap_or(Scientific(0.0, 0)),
                         })
                     })
                 }
@@ -397,11 +412,7 @@ fn to_event_info<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<EventInfo>> {
     ))
 }
 
-fn to_accel_point<'a>(
-    name: &str,
-    v: &'a dyn Array,
-    symlog: bool,
-) -> Result<Vec<Option<AccelPoint>>> {
+fn to_accel_point<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<Option<AccelPoint>>> {
     if let Some(v) = v.as_struct_opt() {
         if let (Some(value), Some(deviation)) =
             (v.column_by_name("value"), v.column_by_name("deviation"))
@@ -414,11 +425,6 @@ fn to_accel_point<'a>(
                     } else {
                         let deviation_str = deviation.context("no deviation in accel point")?;
                         let deviation = parse_scientific(deviation_str)?;
-                        let deviation = if symlog {
-                            deviation.symlog()
-                        } else {
-                            deviation.approx_f64()
-                        };
                         Some(AccelPoint {
                             value: value.context("no value in accel point")?,
                             deviation,
@@ -455,7 +461,7 @@ pub struct AccelInfo {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct AccelPoint {
     pub value: ComplexNumber,
-    pub deviation: f64,
+    pub deviation: Scientific,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -655,7 +661,6 @@ impl DataLoader {
         &self,
         series_ids: &[i32],
         filters: &Filters,
-        symlog: bool,
     ) -> Result<HashMap<i32, Vec<AccelRecord>>> {
         #[cfg(feature = "perf_tracing")]
         let table_start = Instant::now();
@@ -744,7 +749,7 @@ impl DataLoader {
                 batch
                     .column_by_name("computed")
                     .context("No computed in accelerations")?,
-                |x| to_accel_point("computed.[]", x, symlog),
+                |x| to_accel_point("computed.[]", x),
             )?;
 
             let errors = if let Some(col) = batch.column_by_name("errors") {
@@ -817,7 +822,6 @@ impl DataLoader {
     pub async fn filter_data(
         &self,
         filters: &Filters,
-        symlog: bool,
     ) -> Result<Vec<(SeriesRecord, Vec<AccelRecord>)>> {
         // Reset global timing stats
         #[cfg(feature = "perf_tracing")]
@@ -933,7 +937,7 @@ impl DataLoader {
 
         // Load all accelerations for all series in a single query
         let accelerations_map = if !series_ids.is_empty() {
-            self.load_accelerations_for_multiple_series(&series_ids, filters, symlog)
+            self.load_accelerations_for_multiple_series(&series_ids, filters)
                 .await?
         } else {
             HashMap::new()
