@@ -107,7 +107,7 @@ fn filter_params(col_name: &str, filters: &HashMap<String, HashSet<String>>) -> 
         for value in values {
             let f = col(col_name).field(arg).eq(lit(value));
             curr = Some(match curr {
-                None => f.or(col(col_name).eq(lit("_default"))), // ugly fix
+                None => f.or(col(col_name).field(arg).eq(lit("_default"))), // ugly fix
                 Some(curr) => curr.or(f),
             });
         }
