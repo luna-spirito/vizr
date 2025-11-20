@@ -1,4 +1,4 @@
-use crate::data_loader::{AccelRecord, DataItem, DataLoader, Filters, SeriesRecord};
+use crate::data_loader::{AccelRecord, ComplexNumber, DataItem, DataLoader, Filters, SeriesRecord};
 use crate::symlog::symlog_formatter;
 use anyhow::Result;
 use eframe::egui;
@@ -599,16 +599,19 @@ impl Viz {
         // Create grid
         egui::Grid::new("accel_table")
             .striped(true)
-            .max_col_width(350.0)
+            .max_col_width(250.0)
             .show(ui, |ui| {
                 // Header row
                 ui.label(egui::RichText::new("Series ID").strong());
                 ui.label(egui::RichText::new("Название ряда").strong());
                 ui.label(egui::RichText::new("Precision").strong());
                 ui.label(egui::RichText::new("Предел ряда").strong());
+                ui.label(egui::RichText::new("Параметры ряда").strong());
                 ui.label(egui::RichText::new("Название ускорения").strong());
                 ui.label(egui::RichText::new("M").strong());
+                ui.label(egui::RichText::new("Параметры ускорения").strong());
                 ui.label(egui::RichText::new("Точки").strong());
+                ui.label(egui::RichText::new("Отклонения").strong());
                 ui.label(egui::RichText::new("Ошибки").strong());
                 ui.label(egui::RichText::new("Событий").strong());
                 ui.end_row();
@@ -619,10 +622,37 @@ impl Viz {
                     ui.add(egui::Label::new(&series.name).wrap(true));
                     ui.add(egui::Label::new(&series.precision).wrap(true));
                     ui.add(egui::Label::new(series.series_limit.format()).wrap(true));
+
+                    // Series parameters column
+                    if series.arguments.is_empty() {
+                        ui.add(egui::Label::new("(нет параметров)").wrap(true));
+                    } else {
+                        let params: Vec<String> = series
+                            .arguments
+                            .iter()
+                            .map(|(k, v)| format!("{}={}", k, v))
+                            .collect();
+                        ui.add(egui::Label::new(params.join(", ")).wrap(true));
+                    }
+
                     ui.add(egui::Label::new(&accel_record.accel_info.name).wrap(true));
                     ui.add(
                         egui::Label::new(accel_record.accel_info.m_value.to_string()).wrap(true),
                     );
+
+                    // Acceleration parameters column
+                    if accel_record.accel_info.additional_args.is_empty() {
+                        ui.add(egui::Label::new("(нет параметров)").wrap(true));
+                    } else {
+                        let params: Vec<String> = accel_record
+                            .accel_info
+                            .additional_args
+                            .iter()
+                            .map(|(k, v)| format!("{}={}", k, v))
+                            .collect();
+                        ui.add(egui::Label::new(params.join(", ")).wrap(true));
+                    }
+
                     let computed_ns: Vec<String> = accel_record
                         .computed
                         .iter()
@@ -630,6 +660,52 @@ impl Viz {
                         .filter_map(|(j, c)| c.as_ref().map(|_| j.to_string()))
                         .collect();
                     ui.add(egui::Label::new(computed_ns.join(", ")).wrap(true));
+
+                    {
+                        // TODO: FIXME
+                        let crude_deviation = |x: ComplexNumber| {
+                            ((x.real.approx_f64() - series.series_limit.real.approx_f64()).powi(2)
+                                + (x.imag.approx_f64() - series.series_limit.imag.approx_f64())
+                                    .powi(2))
+                            .sqrt()
+                        };
+                        let mut sum_deviation = 0.0;
+                        let mut sum_series_deviation = 0.0;
+                        let mut len = 0;
+                        for (s, a) in series.computed.iter().zip(accel_record.computed.iter()) {
+                            if let Some(a) = a {
+                                sum_series_deviation += crude_deviation(s.value);
+                                sum_deviation += a.deviation.approx_f64();
+                                len += 1
+                            }
+                        }
+                        if len == 0 {
+                            ui.add(egui::Label::new("(нет данных)").wrap(true));
+                        } else {
+                            ui.collapsing(
+                                format!(
+                                    "#{i} Среднее: {:.9} (vs {:.9})",
+                                    sum_deviation / len as f64,
+                                    sum_series_deviation / len as f64
+                                ),
+                                |ui| {
+                                    for (s, a) in
+                                        series.computed.iter().zip(accel_record.computed.iter())
+                                    {
+                                        if let Some(a) = a {
+                                            ui.label(format!(
+                                                "n={}: {} (vs {:.9})",
+                                                s.n,
+                                                a.deviation.format(),
+                                                crude_deviation(s.value)
+                                            ));
+                                        }
+                                    }
+                                },
+                            );
+                        }
+                    }
+
                     if accel_record.errors.is_empty() {
                         ui.add(egui::Label::new("(нет ошибок)").wrap(true));
                     } else {
