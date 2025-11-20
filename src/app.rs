@@ -85,6 +85,7 @@ pub struct Viz {
     show_partial_sums: bool,
     show_limits: bool,
     show_imaginary: bool,
+    force_show_imaginary: bool,
 
     // Screenshot functionality
     pending_screenshots: HashMap<&'static str, egui::Rect>,
@@ -240,7 +241,6 @@ impl Viz {
         let mut lines = Vec::new();
         let mut partial_sum_series = std::collections::HashSet::new();
         let mut limit_series = std::collections::HashSet::new();
-        let mut limit_lines = Vec::new();
 
         // Calculate X range for 1:1 aspect ratio with fixed Y bounds [-10, 10]
         let mut min_x = f64::INFINITY;
@@ -263,8 +263,6 @@ impl Viz {
             if self.show_partial_sums && !partial_sum_series.contains(&series.name) {
                 partial_sum_series.insert(series.name.clone());
 
-                let has_complex = series.computed.iter().any(|c| c.value.imag.abs() > 1e-15);
-
                 let partial_points: PlotPoints = series
                     .computed
                     .iter()
@@ -281,7 +279,10 @@ impl Viz {
                 );
 
                 // Imaginary partial sums
-                if has_complex && self.show_imaginary {
+                let show_imag_partial = self.show_imaginary
+                    && (self.force_show_imaginary
+                        || series.computed.iter().any(|c| c.value.imag.abs() > 0.0));
+                if show_imag_partial {
                     let imag_partial_points: PlotPoints = series
                         .computed
                         .iter()
@@ -306,10 +307,42 @@ impl Viz {
                 if !x_range.is_empty() {
                     let min_x = x_range.iter().fold(f64::INFINITY, |a, &b| a.min(b));
                     let max_x = x_range.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+
+                    // Real limit line
                     let limit_points =
                         PlotPoints::new(vec![[min_x, limit.real], [max_x, limit.real]]);
+                    lines.push(
+                        Line::new(limit_points)
+                            .name(format!(
+                                "{} (предел)",
+                                self.format_series_name_with_args(series)
+                            ))
+                            .color(egui::Color32::from_rgb(255, 0, 0))
+                            .stroke(egui::Stroke::new(3.0, egui::Color32::from_rgb(255, 0, 0))),
+                    );
+
+                    // Imaginary limit line if enabled and either has imaginary part or force_show_imaginary is true
+                    let show_imag_limit = self.show_imaginary
+                        && (self.force_show_imaginary || limit.imag.abs() > 0.0);
+
+                    if show_imag_limit {
+                        let imag_points =
+                            PlotPoints::new(vec![[min_x, limit.imag], [max_x, limit.imag]]);
+                        lines.push(
+                            Line::new(imag_points)
+                                .name(format!(
+                                    "{} (предел, мнимая часть)",
+                                    self.format_series_name_with_args(series)
+                                ))
+                                .color(egui::Color32::from_rgb(255, 100, 100))
+                                .stroke(egui::Stroke::new(
+                                    2.0,
+                                    egui::Color32::from_rgb(255, 100, 100),
+                                )),
+                        );
+                    }
+
                     limit_series.insert(series.name.clone());
-                    limit_lines.push((series.name.clone(), limit_points));
                 }
             }
 
@@ -320,10 +353,6 @@ impl Viz {
                 }
 
                 let item_name = self.format_item_name(series, &accel_record.accel_info);
-                let has_complex = accel_record
-                    .computed
-                    .iter()
-                    .any(|cn| cn.map_or(false, |ap| ap.value.imag.abs() > 1e-15));
 
                 // Main convergence line - zip series computed with accel computed
                 let points: PlotPoints = series
@@ -336,7 +365,13 @@ impl Viz {
                 lines.push(Line::new(points).name(item_name.clone()));
 
                 // Imaginary part if present and enabled
-                if has_complex && self.show_imaginary {
+                let show_imag_accel = self.show_imaginary
+                    && (self.force_show_imaginary
+                        || accel_record
+                            .computed
+                            .iter()
+                            .any(|cn| cn.map_or(false, |ap| ap.value.imag.abs() > 0.0)));
+                if show_imag_accel {
                     let imag_points: PlotPoints = series
                         .computed
                         .iter()
@@ -350,22 +385,6 @@ impl Viz {
                             .color(egui::Color32::from_rgb(255, 165, 0)),
                     );
                 }
-            }
-        }
-
-        // Add limit lines
-        for (series_name, points) in limit_lines {
-            // Find the series record to get arguments
-            if let Some((series, _)) = data.iter().find(|(s, _)| s.name == series_name) {
-                lines.push(
-                    Line::new(points)
-                        .name(format!(
-                            "{} (предел)",
-                            self.format_series_name_with_args(series)
-                        ))
-                        .color(egui::Color32::from_rgb(255, 0, 0))
-                        .stroke(egui::Stroke::new(3.0, egui::Color32::from_rgb(255, 0, 0))),
-                );
             }
         }
 
@@ -563,19 +582,17 @@ impl Viz {
         ui.spacing_mut().item_spacing = egui::vec2(20.0, 10.0);
 
         // Create grid
-        egui::Grid::new("accel_table")
-            .striped(true)
-            .show(ui, |ui| {
-                // Header row
-                ui.label(egui::RichText::new("Series ID").strong());
-                ui.label(egui::RichText::new("Series Name").strong());
-                ui.label(egui::RichText::new("Precision").strong());
-                ui.label(egui::RichText::new("Accel Name").strong());
-                ui.label(egui::RichText::new("M Value").strong());
-                ui.label(egui::RichText::new("Computed n's").strong());
-                ui.label(egui::RichText::new("Errors").strong());
-                ui.label(egui::RichText::new("Events").strong());
-                ui.end_row();
+        egui::Grid::new("accel_table").striped(true).show(ui, |ui| {
+            // Header row
+            ui.label(egui::RichText::new("Series ID").strong());
+            ui.label(egui::RichText::new("Series Name").strong());
+            ui.label(egui::RichText::new("Precision").strong());
+            ui.label(egui::RichText::new("Accel Name").strong());
+            ui.label(egui::RichText::new("M Value").strong());
+            ui.label(egui::RichText::new("Computed n's").strong());
+            ui.label(egui::RichText::new("Errors").strong());
+            ui.label(egui::RichText::new("Events").strong());
+            ui.end_row();
 
             // Data rows
             for (i, &(series, accel_record)) in all_records.iter().enumerate() {
@@ -584,21 +601,35 @@ impl Viz {
                 ui.add(egui::Label::new(&series.precision).wrap(true));
                 ui.add(egui::Label::new(&accel_record.accel_info.name).wrap(true));
                 ui.add(egui::Label::new(accel_record.accel_info.m_value.to_string()).wrap(true));
-                let computed_ns: Vec<String> = accel_record.computed.iter().enumerate().filter_map(|(j, c)| c.as_ref().map(|_| j.to_string())).collect();
+                let computed_ns: Vec<String> = accel_record
+                    .computed
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(j, c)| c.as_ref().map(|_| j.to_string()))
+                    .collect();
                 ui.add(egui::Label::new(computed_ns.join(", ")).wrap(true));
-                ui.collapsing(format!("Errors ({}) - Row {}", accel_record.errors.len(), i), |ui| {
-                    for error in &accel_record.errors {
-                        ui.label(format!("n={}: {}", error.n, error.message));
-                    }
-                });
-                ui.collapsing(format!("Events ({}) - Row {}", accel_record.events.len(), i), |ui| {
-                    for event in &accel_record.events {
-                        ui.label(format!("n={}: {} - {}", event.n, event.name, event.description));
-                    }
-                });
+                ui.collapsing(
+                    format!("Errors ({}) - Row {}", accel_record.errors.len(), i),
+                    |ui| {
+                        for error in &accel_record.errors {
+                            ui.label(format!("n={}: {}", error.n, error.message));
+                        }
+                    },
+                );
+                ui.collapsing(
+                    format!("Events ({}) - Row {}", accel_record.events.len(), i),
+                    |ui| {
+                        for event in &accel_record.events {
+                            ui.label(format!(
+                                "n={}: {} - {}",
+                                event.n, event.name, event.description
+                            ));
+                        }
+                    },
+                );
                 ui.end_row();
             }
-            });
+        });
     }
 }
 
@@ -630,6 +661,7 @@ impl DashboardApp {
                 show_partial_sums: true,
                 show_limits: true,
                 show_imaginary: true,
+                force_show_imaginary: false,
                 pending_screenshots: HashMap::new(),
                 plot_hovered: false,
             },
@@ -1120,6 +1152,12 @@ impl eframe::App for DashboardApp {
                     ui.checkbox(&mut self.viz.show_partial_sums, "Частичные суммы");
                     ui.checkbox(&mut self.viz.show_limits, "Пределы");
                     ui.checkbox(&mut self.viz.show_imaginary, "Мнимые части");
+                    if self.viz.show_imaginary {
+                        ui.checkbox(
+                            &mut self.viz.force_show_imaginary,
+                            "ВСЕГДА показывать мнимую часть",
+                        );
+                    }
                 });
 
                 ui.separator();
