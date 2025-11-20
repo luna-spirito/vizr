@@ -582,54 +582,67 @@ impl Viz {
         ui.spacing_mut().item_spacing = egui::vec2(20.0, 10.0);
 
         // Create grid
-        egui::Grid::new("accel_table").striped(true).show(ui, |ui| {
-            // Header row
-            ui.label(egui::RichText::new("Series ID").strong());
-            ui.label(egui::RichText::new("Series Name").strong());
-            ui.label(egui::RichText::new("Precision").strong());
-            ui.label(egui::RichText::new("Accel Name").strong());
-            ui.label(egui::RichText::new("M Value").strong());
-            ui.label(egui::RichText::new("Computed n's").strong());
-            ui.label(egui::RichText::new("Errors").strong());
-            ui.label(egui::RichText::new("Events").strong());
-            ui.end_row();
-
-            // Data rows
-            for (i, &(series, accel_record)) in all_records.iter().enumerate() {
-                ui.add(egui::Label::new(series.series_id.to_string()).wrap(true));
-                ui.add(egui::Label::new(&series.name).wrap(true));
-                ui.add(egui::Label::new(&series.precision).wrap(true));
-                ui.add(egui::Label::new(&accel_record.accel_info.name).wrap(true));
-                ui.add(egui::Label::new(accel_record.accel_info.m_value.to_string()).wrap(true));
-                let computed_ns: Vec<String> = accel_record
-                    .computed
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(j, c)| c.as_ref().map(|_| j.to_string()))
-                    .collect();
-                ui.add(egui::Label::new(computed_ns.join(", ")).wrap(true));
-                ui.collapsing(
-                    format!("Errors ({}) - Row {}", accel_record.errors.len(), i),
-                    |ui| {
-                        for error in &accel_record.errors {
-                            ui.label(format!("n={}: {}", error.n, error.message));
-                        }
-                    },
-                );
-                ui.collapsing(
-                    format!("Events ({}) - Row {}", accel_record.events.len(), i),
-                    |ui| {
-                        for event in &accel_record.events {
-                            ui.label(format!(
-                                "n={}: {} - {}",
-                                event.n, event.name, event.description
-                            ));
-                        }
-                    },
-                );
+        egui::Grid::new("accel_table")
+            .striped(true)
+            .max_col_width(350.0)
+            .show(ui, |ui| {
+                // Header row
+                ui.label(egui::RichText::new("Series ID").strong());
+                ui.label(egui::RichText::new("Series Name").strong());
+                ui.label(egui::RichText::new("Precision").strong());
+                ui.label(egui::RichText::new("Accel Name").strong());
+                ui.label(egui::RichText::new("M Value").strong());
+                ui.label(egui::RichText::new("Computed n's").strong());
+                ui.label(egui::RichText::new("Errors").strong());
+                ui.label(egui::RichText::new("Events").strong());
                 ui.end_row();
-            }
-        });
+
+                // Data rows
+                for (i, &(series, accel_record)) in all_records.iter().enumerate() {
+                    ui.add(egui::Label::new(series.series_id.to_string()).wrap(true));
+                    ui.add(egui::Label::new(&series.name).wrap(true));
+                    ui.add(egui::Label::new(&series.precision).wrap(true));
+                    ui.add(egui::Label::new(&accel_record.accel_info.name).wrap(true));
+                    ui.add(
+                        egui::Label::new(accel_record.accel_info.m_value.to_string()).wrap(true),
+                    );
+                    let computed_ns: Vec<String> = accel_record
+                        .computed
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(j, c)| c.as_ref().map(|_| j.to_string()))
+                        .collect();
+                    ui.add(egui::Label::new(computed_ns.join(", ")).wrap(true));
+                    if accel_record.errors.is_empty() {
+                        ui.add(egui::Label::new("(no errors)").wrap(true));
+                    } else {
+                        ui.collapsing(
+                            format!("#{i}: {} errors", accel_record.errors.len()),
+                            |ui| {
+                                for error in &accel_record.errors {
+                                    ui.label(format!("n={}: {}", error.n, error.message));
+                                }
+                            },
+                        );
+                    }
+                    if accel_record.events.is_empty() {
+                        ui.add(egui::Label::new("(no events)").wrap(true));
+                    } else {
+                        ui.collapsing(
+                            format!("#{i}: {} events", accel_record.events.len()),
+                            |ui| {
+                                for event in &accel_record.events {
+                                    ui.label(format!(
+                                        "n={}: {} - {}",
+                                        event.n, event.name, event.description
+                                    ));
+                                }
+                            },
+                        );
+                    }
+                    ui.end_row();
+                }
+            });
     }
 }
 
