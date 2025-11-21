@@ -472,7 +472,7 @@ pub struct AccelRecord {
     pub events: Vec<EventInfo>,
 }
 
-pub type DataItem = (SeriesRecord, Vec<AccelRecord>);
+pub type SeriesData = (SeriesRecord, Vec<AccelRecord>);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Metadata {

@@ -1,3 +1,4 @@
+#![feature(type_alias_impl_trait)]
 mod app;
 mod data_loader;
 mod symlog;
@@ -33,7 +34,9 @@ async fn main() -> anyhow::Result<()> {
     eframe::run_native(
         "Vizr - Parquet Data Visualizer",
         options,
-        Box::new(|_cc| Box::new(app::DashboardApp::new(Arc::new(loader))) as Box<dyn eframe::App>),
+        Box::new(|_cc| {
+            Ok(Box::new(app::DashboardApp::new(Arc::new(loader))) as Box<dyn eframe::App>)
+        }),
     )
     .map_err(|e| anyhow::anyhow!("GUI error: {}", e))?;
     Ok(())
