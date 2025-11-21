@@ -599,7 +599,7 @@ impl Viz {
         // Create grid
         egui::Grid::new("accel_table")
             .striped(true)
-            .max_col_width(250.0)
+            .max_col_width(100.0)
             .show(ui, |ui| {
                 // Header row
                 ui.label(egui::RichText::new("Series ID").strong());
@@ -610,7 +610,8 @@ impl Viz {
                 ui.label(egui::RichText::new("Название ускорения").strong());
                 ui.label(egui::RichText::new("M").strong());
                 ui.label(egui::RichText::new("Параметры ускорения").strong());
-                ui.label(egui::RichText::new("Точки").strong());
+                ui.label(egui::RichText::new("S_n ряда").strong());
+                ui.label(egui::RichText::new("S_n ускорения").strong());
                 ui.label(egui::RichText::new("Отклонения").strong());
                 ui.label(egui::RichText::new("Ошибки").strong());
                 ui.label(egui::RichText::new("Событий").strong());
@@ -653,13 +654,40 @@ impl Viz {
                         ui.add(egui::Label::new(params.join(", ")).wrap(true));
                     }
 
-                    let computed_ns: Vec<String> = accel_record
-                        .computed
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(j, c)| c.as_ref().map(|_| j.to_string()))
-                        .collect();
-                    ui.add(egui::Label::new(computed_ns.join(", ")).wrap(true));
+                    if series.computed.is_empty() {
+                        ui.add(egui::Label::new("(нет точек)").wrap(true));
+                    } else {
+                        ui.collapsing(
+                            format!("#{i}: {} значений", series.computed.len()),
+                            |ui| {
+                                for c in &series.computed {
+                                    ui.label(format!("n={}: {}", c.n, c.value.format()));
+                                }
+                            },
+                        );
+                    }
+
+                    // Accel values
+                    {
+                        let computed = accel_record
+                            .computed
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, j)| Some((i, j.as_ref()?)))
+                            .collect::<Vec<_>>();
+                        if computed.is_empty() {
+                            ui.add(egui::Label::new("(нет точек)").wrap(true));
+                        } else {
+                            ui.collapsing(
+                                format!("#{i}: {} значений", computed.len()),
+                                |ui| {
+                                    for (j, c) in computed {
+                                        ui.label(format!("n={}: {}", j, c.value.format()));
+                                    }
+                                },
+                            );
+                        }
+                    }
 
                     {
                         // TODO: FIXME
