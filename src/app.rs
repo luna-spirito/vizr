@@ -6,7 +6,7 @@ use anyhow::Result;
 use eframe::egui;
 
 use egui::{Color32, Context, Stroke, Ui, ViewportCommand};
-use egui_plot::{Line, MarkerShape, Plot, PlotPoint, Points};
+use egui_plot::{CoordinatesFormatter, Corner, Line, MarkerShape, Plot, PlotPoint, Points};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, mpsc};
 use std::{mem, slice};
@@ -552,7 +552,11 @@ fn create_error_plot(data: &[SeriesDataRef], symlog: bool) -> CreateErrorPlot {
             .y_axis_label("Абсолютная ошибка")
             .legend(egui_plot::Legend::default());
         if symlog {
-            plot = plot.y_axis_formatter(|mark, _| symlog_formatter(mark.value));
+            plot = plot
+                .y_axis_formatter(|mark, _| symlog_formatter(mark.value))
+                .label_formatter(|name, value| {
+                    format!("{name}\nx={}\ny={}", value.x, symlog_formatter(value.y))
+                });
         }
         let plot = plot.show(ui, |plot_ui| {
             for (n, points) in &lines {
@@ -628,7 +632,11 @@ fn create_performance_plot(data: &[SeriesDataRef], symlog: bool) -> CreatePerfor
             .y_axis_label("Минимальная ошибка")
             .legend(egui_plot::Legend::default());
         if symlog {
-            plot = plot.y_axis_formatter(|mark, _| symlog_formatter(mark.value));
+            plot = plot
+                .y_axis_formatter(|mark, _| symlog_formatter(mark.value))
+                .label_formatter(|name, value| {
+                    format!("{name}\nx={}\ny={}", value.x, symlog_formatter(value.y))
+                });
         }
         let plot = plot.show(ui, |plot_ui| {
             for (name, points) in &points {
