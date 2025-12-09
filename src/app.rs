@@ -1112,66 +1112,99 @@ impl FilteredData {
         let mut updated = false;
         ui.heading("Быстрые фильтры");
         ui.add_space(5.0);
-        ui.horizontal_wrapped(|ui| {
-            // Precision checkboxes
-            for precision in &available_filters.precisions {
-                let mut checked = selected_filters.precisions.contains(precision);
-                if ui
-                    .checkbox(&mut checked, format!("prec={precision}"))
-                    .changed()
-                {
-                    if checked {
-                        selected_filters.precisions.insert(precision.clone());
-                    } else {
-                        selected_filters.precisions.remove(precision);
-                    }
-                    updated = true;
-                }
+        
+        let mut first_group = true;
+        
+        // Helper function to add separator between groups
+        let mut add_separator = |ui: &mut Ui| {
+            if !first_group {
+                ui.separator();
+            } else {
+                first_group = false;
             }
-            // Series checkboxes
-            for series in &available_filters.base_series {
-                let mut checked = selected_filters.base_series.contains(series);
-                if ui
-                    .checkbox(&mut checked, format!("series={series}"))
-                    .changed()
-                {
-                    if checked {
-                        selected_filters.base_series.insert(series.clone());
-                    } else {
-                        selected_filters.base_series.remove(series);
+        };
+        
+        // Precision group
+        if !available_filters.precisions.is_empty() {
+            add_separator(ui);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("prec:").strong());
+                for precision in &available_filters.precisions {
+                    let mut checked = selected_filters.precisions.contains(precision);
+                    if ui.checkbox(&mut checked, precision).changed() {
+                        if checked {
+                            selected_filters.precisions.insert(precision.clone());
+                        } else {
+                            selected_filters.precisions.remove(precision);
+                        }
+                        updated = true;
                     }
-                    updated = true;
                 }
-            }
-            // Acceleration checkboxes
-            for accel in &available_filters.base_accel {
-                let mut checked = selected_filters.base_accel.contains(accel);
-                if ui
-                    .checkbox(&mut checked, format!("accel={accel}"))
-                    .changed()
-                {
-                    if checked {
-                        selected_filters.base_accel.insert(accel.clone());
-                    } else {
-                        selected_filters.base_accel.remove(accel);
+            });
+        }
+        
+        // Series group
+        if !available_filters.base_series.is_empty() {
+            add_separator(ui);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("series:").strong());
+                for series in &available_filters.base_series {
+                    let mut checked = selected_filters.base_series.contains(series);
+                    if ui.checkbox(&mut checked, series).changed() {
+                        if checked {
+                            selected_filters.base_series.insert(series.clone());
+                        } else {
+                            selected_filters.base_series.remove(series);
+                        }
+                        updated = true;
                     }
-                    updated = true;
                 }
-            }
-            // M values checkboxes
-            for m in &available_filters.m_values {
-                let mut checked = selected_filters.m_values.contains(m);
-                if ui.checkbox(&mut checked, format!("m={}", m)).changed() {
-                    if checked {
-                        selected_filters.m_values.insert(*m);
-                    } else {
-                        selected_filters.m_values.remove(m);
+            });
+        }
+        
+        // Acceleration group
+        if !available_filters.base_accel.is_empty() {
+            add_separator(ui);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("accel:").strong());
+                for accel in &available_filters.base_accel {
+                    let mut checked = selected_filters.base_accel.contains(accel);
+                    if ui.checkbox(&mut checked, accel).changed() {
+                        if checked {
+                            selected_filters.base_accel.insert(accel.clone());
+                        } else {
+                            selected_filters.base_accel.remove(accel);
+                        }
+                        updated = true;
                     }
-                    updated = true;
                 }
-            }
-            // Series parameters checkboxes
-            for (param_name, values) in &available_filters.series_params {
+            });
+        }
+        
+        // M values group
+        if !available_filters.m_values.is_empty() {
+            add_separator(ui);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("m:").strong());
+                for m in &available_filters.m_values {
+                    let mut checked = selected_filters.m_values.contains(m);
+                    if ui.checkbox(&mut checked, &m.to_string()).changed() {
+                        if checked {
+                            selected_filters.m_values.insert(*m);
+                        } else {
+                            selected_filters.m_values.remove(m);
+                        }
+                        updated = true;
+                    }
+                }
+            });
+        }
+        
+        // Series parameters groups
+        for (param_name, values) in &available_filters.series_params {
+            add_separator(ui);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(&format!("{}:", param_name)).strong());
                 for value in values {
                     let param_selected = selected_filters
                         .series_params
@@ -1179,10 +1212,7 @@ impl FilteredData {
                         .map(|set| set.contains(value))
                         .unwrap_or(false);
                     let mut checked = param_selected;
-                    if ui
-                        .checkbox(&mut checked, format!("{param_name}={value}"))
-                        .changed()
-                    {
+                    if ui.checkbox(&mut checked, value).changed() {
                         if checked {
                             selected_filters
                                 .series_params
@@ -1200,9 +1230,14 @@ impl FilteredData {
                         updated = true;
                     }
                 }
-            }
-            // Acceleration parameters checkboxes
-            for (param_name, values) in &available_filters.accel_params {
+            });
+        }
+        
+        // Acceleration parameters groups
+        for (param_name, values) in &available_filters.accel_params {
+            add_separator(ui);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(&format!("{}:", param_name)).strong());
                 for value in values {
                     let param_selected = selected_filters
                         .accel_params
@@ -1210,10 +1245,7 @@ impl FilteredData {
                         .map(|set| set.contains(value))
                         .unwrap_or(false);
                     let mut checked = param_selected;
-                    if ui
-                        .checkbox(&mut checked, format!("{param_name}={value}"))
-                        .changed()
-                    {
+                    if ui.checkbox(&mut checked, value).changed() {
                         if checked {
                             selected_filters
                                 .accel_params
@@ -1231,8 +1263,9 @@ impl FilteredData {
                         updated = true;
                     }
                 }
-            }
-        });
+            });
+        }
+        
         ui.add_space(5.0);
         return updated;
     }
