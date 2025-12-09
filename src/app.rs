@@ -1,12 +1,10 @@
-use crate::data_loader::{
-    AccelInfo, AccelRecord, ComplexNumber, DataLoader, Filters, SeriesData, SeriesRecord,
-};
+use crate::data_loader::{AccelInfo, AccelRecord, DataLoader, Filters, SeriesData, SeriesRecord};
 use crate::symlog::symlog_formatter;
 use anyhow::Result;
 use eframe::egui;
 
 use egui::{Color32, Context, Stroke, Ui, ViewportCommand};
-use egui_plot::{CoordinatesFormatter, Corner, Line, MarkerShape, Plot, PlotPoint, Points};
+use egui_plot::{Line, MarkerShape, Plot, PlotPoint, Points};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, mpsc};
 use std::{mem, slice};
@@ -462,18 +460,16 @@ fn create_convergence_plot(data: &[SeriesDataRef]) -> CreateConvergencePlot {
                 if allowed {
                     let color = match (real, kind) {
                         (Real, PartialSum) => Some(Color32::from_rgb(128, 128, 128)),
-                        (Imag { zero: _ }, PartialSum) => {
-                            Some(egui::Color32::from_rgb(255, 192, 203))
-                        }
+                        (Imag { zero: _ }, PartialSum) => Some(Color32::from_rgb(255, 192, 203)),
                         (Real, Limit) => Some(Color32::from_rgb(255, 0, 0)),
                         (Imag { zero: _ }, Limit) => Some(Color32::from_rgb(255, 100, 100)),
                         (Real, Accel) => None,
                         (Imag { zero: _ }, Accel) => Some(Color32::from_rgb(255, 165, 0)),
                     };
                     let stroke = match (real, kind) {
-                        (Real, Limit) => Some(Stroke::new(3.0, egui::Color32::from_rgb(255, 0, 0))),
+                        (Real, Limit) => Some(Stroke::new(3.0, Color32::from_rgb(255, 0, 0))),
                         (Imag { zero: _ }, Limit) => {
-                            Some(Stroke::new(2.0, egui::Color32::from_rgb(255, 100, 100)))
+                            Some(Stroke::new(2.0, Color32::from_rgb(255, 100, 100)))
                         }
                         _ => None,
                     };
@@ -563,7 +559,7 @@ fn create_error_plot(data: &[SeriesDataRef], symlog: bool) -> CreateErrorPlot {
     }
 
     move |vis, ui| {
-        if lines.is_empty() && partial_lines.is_empty() {
+        if lines.is_empty() && (!vis.show_partial_sums || partial_lines.is_empty()) {
             ui.label("Нет данных для отображения");
             return;
         }
@@ -583,15 +579,18 @@ fn create_error_plot(data: &[SeriesDataRef], symlog: bool) -> CreateErrorPlot {
                 });
         }
         let plot = plot.show(ui, |plot_ui| {
-            for (n, points) in &partial_lines {
-                plot_ui.line(
-                    Line::new(points.as_slice())
-                        .name(n)
-                        .color(Color32::from_rgb(128, 128, 128)),
-                );
-            }
             for (n, points) in &lines {
                 plot_ui.line(Line::new(points.as_slice()).name(n));
+            }
+            if vis.show_partial_sums {
+                for (n, points) in &partial_lines {
+                    plot_ui.line(
+                        Line::new(points.as_slice())
+                            .name(n)
+                            .color(Color32::from_rgb(255, 0, 0))
+                            .stroke(Stroke::new(3.0, Color32::from_rgb(255, 0, 0))),
+                    );
+                }
             }
         });
         vis.plot_hovered |= plot.response.hovered();
