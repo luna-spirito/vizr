@@ -86,6 +86,7 @@ pub struct Vis {
     show_partial_sums: bool,
     show_limits: bool,
     show_imaginary: bool,
+    show_real: bool,
     force_show_imaginary: bool,
 
     // Screenshot functionality
@@ -449,7 +450,7 @@ fn create_convergence_plot(data: &[SeriesDataRef]) -> CreateConvergencePlot {
             for (i, lines) in lines.iter().enumerate() {
                 let (real, kind) = indtov(i).unwrap();
                 let mut allowed = match real {
-                    Real => true,
+                    Real => viz.show_real,
                     Imag { zero } => viz.show_imaginary && (viz.force_show_imaginary || !zero),
                 };
                 allowed &= match kind {
@@ -1308,6 +1309,7 @@ impl DashboardApp {
                 show_partial_sums: true,
                 show_limits: true,
                 show_imaginary: true,
+                show_real: true,
                 force_show_imaginary: false,
                 pending_screenshots: HashMap::new(),
                 plot_hovered: false,
@@ -1480,6 +1482,7 @@ impl eframe::App for DashboardApp {
                     }
                     ui.checkbox(&mut self.viz.show_partial_sums, "Частичные суммы");
                     ui.checkbox(&mut self.viz.show_limits, "Пределы");
+                    ui.checkbox(&mut self.viz.show_real, "Действительные части");
                     ui.checkbox(&mut self.viz.show_imaginary, "Мнимые части");
                     if self.viz.show_imaginary {
                         ui.checkbox(
