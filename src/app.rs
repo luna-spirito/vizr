@@ -502,7 +502,31 @@ fn create_convergence_plot(data: &[SeriesDataRef]) -> CreateConvergencePlot {
 type CreateErrorPlot = impl Fn(&mut Vis, &mut Ui);
 #[define_opaque(CreateErrorPlot)]
 fn create_error_plot(data: &[SeriesDataRef], symlog: bool) -> CreateErrorPlot {
+    let mut partial_lines = Vec::new();
     let mut lines = Vec::new();
+
+    for (series, _) in data.iter() {
+        // Add series deviation line
+        let series_deviation_points: Vec<PlotPoint> = series
+            .computed
+            .iter()
+            .map(|c| {
+                PlotPoint::new(
+                    c.n as f64,
+                    if symlog {
+                        c.deviation.symlog()
+                    } else {
+                        c.deviation.approx_f64()
+                    },
+                )
+            })
+            .collect();
+
+        partial_lines.push((
+            format!("{} (частичные суммы)", format_series_name_with_args(series)),
+            series_deviation_points,
+        ));
+    }
 
     for (series, accel_records) in data.iter() {
         if series.computed.is_empty() {
@@ -539,7 +563,7 @@ fn create_error_plot(data: &[SeriesDataRef], symlog: bool) -> CreateErrorPlot {
     }
 
     move |vis, ui| {
-        if lines.is_empty() {
+        if lines.is_empty() && partial_lines.is_empty() {
             ui.label("Нет данных для отображения");
             return;
         }
@@ -559,6 +583,13 @@ fn create_error_plot(data: &[SeriesDataRef], symlog: bool) -> CreateErrorPlot {
                 });
         }
         let plot = plot.show(ui, |plot_ui| {
+            for (n, points) in &partial_lines {
+                plot_ui.line(
+                    Line::new(points.as_slice())
+                        .name(n)
+                        .color(Color32::from_rgb(128, 128, 128)),
+                );
+            }
             for (n, points) in &lines {
                 plot_ui.line(Line::new(points.as_slice()).name(n));
             }
@@ -716,11 +747,6 @@ fn create_accel_records_table(data: &[SeriesDataRef]) -> CreateAccelRecordsTable
                 .map(|(j, c)| format!("n={}: {}", j, c.value.format()))
                 .collect();
             // Отклонения values
-            let crude_deviation = |x: ComplexNumber| {
-                ((x.real.approx_f64() - series.series_limit.real.approx_f64()).powi(2)
-                    + (x.imag.approx_f64() - series.series_limit.imag.approx_f64()).powi(2))
-                .sqrt()
-            };
             let mut deviation_values = Vec::new();
             let mut sum_deviation = 0.0;
             let mut sum_series_deviation = 0.0;
@@ -728,15 +754,15 @@ fn create_accel_records_table(data: &[SeriesDataRef]) -> CreateAccelRecordsTable
 
             for (s, a) in series.computed.iter().zip(accel_record.computed.iter()) {
                 if let Some(a) = a {
-                    sum_series_deviation += crude_deviation(s.value);
+                    sum_series_deviation += s.deviation.approx_f64();
                     sum_deviation += a.deviation.approx_f64();
                     len += 1;
 
                     deviation_values.push(format!(
-                        "n={}: {} (vs {:.9})",
+                        "n={}: {} (vs {})",
                         s.n,
                         a.deviation.format(),
-                        crude_deviation(s.value)
+                        s.deviation.format()
                     ));
                 }
             }

@@ -143,9 +143,10 @@ impl ComplexNumber {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Point {
+pub struct SeriesPoint {
     pub n: i32,
     pub value: ComplexNumber,
+    pub deviation: Scientific,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -339,15 +340,24 @@ fn to_complex<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<Option<ComplexNumb
     ))
 }
 
-fn to_point<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<Point>> {
+fn to_series_point<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<SeriesPoint>> {
     if let Some(v) = v.as_struct_opt() {
-        if let (Some(n), Some(value)) = (v.column_by_name("n"), v.column_by_name("value")) {
-            if let (Ok(n), Ok(value)) = (to_i64("", n), to_complex("", value)) {
+        if let (Some(n), Some(value), Some(deviation)) = (
+            v.column_by_name("n"),
+            v.column_by_name("value"),
+            v.column_by_name("deviation"),
+        ) {
+            if let (Ok(n), Ok(value), Ok(deviation)) = (
+                to_i64("", n),
+                to_complex("", value),
+                to_str("", deviation),
+            ) {
                 let mut res = Vec::new();
-                for (n, value) in n.into_iter().zip(value) {
-                    res.push(Point {
+                for ((n, value), deviation) in n.into_iter().zip(value).zip(deviation) {
+                    res.push(SeriesPoint {
                         n: n.context("n not provided")? as i32,
                         value: value.context("value not provided")?,
+                        deviation: parse_scientific(deviation.context("deviation not provided")?)?,
                     })
                 }
                 return Ok(res);
@@ -355,7 +365,7 @@ fn to_point<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<Point>> {
         }
     }
     Err(anyhow!(
-        "Expected `{name}` to be {{ n: int, value: {{ real: str, imag: str }} }}, found {}",
+        "Expected `{name}` to be {{ n: int, value: {{ real: str, imag: str }}, deviation: str }}, found {}",
         v.data_type()
     ))
 }
@@ -448,7 +458,7 @@ pub struct SeriesRecord {
     pub name: String,
     pub arguments: HashMap<String, String>,
     pub series_limit: ComplexNumber,
-    pub computed: Vec<Point>,
+    pub computed: Vec<SeriesPoint>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -905,7 +915,7 @@ impl DataLoader {
                 batch
                     .column_by_name("computed")
                     .context("No computed in series")?,
-                |x| to_point("computed.[]", x),
+                |x| to_series_point("computed.[]", x),
             )?;
 
             for (((((precision, series_id), series_name), arguments), series_limit), computed) in
