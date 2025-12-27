@@ -6,7 +6,7 @@ use eframe::egui;
 use egui::{Color32, Context, Stroke, Ui, ViewportCommand};
 use egui_plot::{Line, MarkerShape, Plot, PlotPoint, Points};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, mpsc};
+use std::sync::{mpsc, Arc};
 use std::{mem, slice};
 
 // TODO: Current `symlog` flag implementation is absolutely awful. To be fixed.
@@ -284,8 +284,6 @@ fn create_convergence_plot(data: &[SeriesDataRef]) -> CreateConvergencePlot {
     use LineKind::*;
     use LineReal::*;
     let mut lines: [Vec<(String, Vec<PlotPoint>)>; TOTAL_VIS] = [const { Vec::new() }; 9];
-    let mut encountered_partial_sum_series = HashSet::new();
-    let mut encountered_limit_series = HashSet::new();
 
     // Calculate X range for 1:1 aspect ratio with fixed Y bounds [-10, 10]
     let mut min_x = f64::INFINITY;
@@ -305,73 +303,62 @@ fn create_convergence_plot(data: &[SeriesDataRef]) -> CreateConvergencePlot {
         }
 
         // Partial sums (one per series)
-        if !encountered_partial_sum_series.contains(&series.name) {
-            encountered_partial_sum_series.insert(series.name.clone());
+        let partial_points = series
+            .computed
+            .iter()
+            .map(|c| PlotPoint::new(c.n as f64, c.value.real.approx_f64()))
+            .collect();
 
-            let partial_points = series
-                .computed
-                .iter()
-                .map(|c| PlotPoint::new(c.n as f64, c.value.real.approx_f64()))
-                .collect();
+        lines[vtoind(Real, PartialSum)].push((
+            format!("{} (частичные суммы)", format_series_name_with_args(series)),
+            partial_points,
+        ));
 
-            lines[vtoind(Real, PartialSum)].push((
-                format!("{} (частичные суммы)", format_series_name_with_args(series)),
-                partial_points,
+        // Imaginary partial sums
+        let zero = series.computed.iter().all(|c| c.value.imag.0.abs() == 0.0);
+        let imag_partial_points: Vec<PlotPoint> = series
+            .computed
+            .iter()
+            .map(|c| PlotPoint::new(c.n as f64, c.value.imag.approx_f64()))
+            .collect();
+
+        lines[vtoind(Imag { zero }, PartialSum)].push((
+            format!(
+                "{} (частичные суммы, мнимая часть)",
+                format_series_name_with_args(series)
+            ),
+            imag_partial_points,
+        ));
+
+        let limit = &series.series_limit;
+        let x_range: Vec<f64> = series.computed.iter().map(|c| c.n as f64).collect();
+        if !x_range.is_empty() {
+            let min_x = x_range.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+            let max_x = x_range.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+
+            // Real limit line
+            let real_y = limit.real.approx_f64();
+            let limit_points = vec![PlotPoint::new(min_x, real_y), PlotPoint::new(max_x, real_y)];
+            lines[vtoind(Real, Limit)].push((
+                format!("{} (предел)", format_series_name_with_args(series)),
+                limit_points,
             ));
 
-            // Imaginary partial sums
-            let zero = series.computed.iter().all(|c| c.value.imag.0.abs() == 0.0);
-            let imag_partial_points: Vec<PlotPoint> = series
-                .computed
-                .iter()
-                .map(|c| PlotPoint::new(c.n as f64, c.value.imag.approx_f64()))
-                .collect();
-
-            lines[vtoind(Imag { zero }, PartialSum)].push((
+            let imag_y = limit.imag.approx_f64();
+            let imag_points = vec![PlotPoint::new(min_x, imag_y), PlotPoint::new(max_x, imag_y)];
+            lines[vtoind(
+                Imag {
+                    zero: limit.imag.0 == 0.0,
+                },
+                Limit,
+            )]
+            .push((
                 format!(
-                    "{} (частичные суммы, мнимая часть)",
+                    "{} (предел, мнимая часть)",
                     format_series_name_with_args(series)
                 ),
-                imag_partial_points,
+                imag_points,
             ));
-        }
-
-        // Limit line (one per series)
-        if !encountered_limit_series.contains(&series.name) {
-            let limit = &series.series_limit;
-            let x_range: Vec<f64> = series.computed.iter().map(|c| c.n as f64).collect();
-            if !x_range.is_empty() {
-                let min_x = x_range.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-                let max_x = x_range.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-
-                // Real limit line
-                let real_y = limit.real.approx_f64();
-                let limit_points =
-                    vec![PlotPoint::new(min_x, real_y), PlotPoint::new(max_x, real_y)];
-                lines[vtoind(Real, Limit)].push((
-                    format!("{} (предел)", format_series_name_with_args(series)),
-                    limit_points,
-                ));
-
-                let imag_y = limit.imag.approx_f64();
-                let imag_points =
-                    vec![PlotPoint::new(min_x, imag_y), PlotPoint::new(max_x, imag_y)];
-                lines[vtoind(
-                    Imag {
-                        zero: limit.imag.0 == 0.0,
-                    },
-                    Limit,
-                )]
-                .push((
-                    format!(
-                        "{} (предел, мнимая часть)",
-                        format_series_name_with_args(series)
-                    ),
-                    imag_points,
-                ));
-
-                encountered_limit_series.insert(series.name.clone());
-            }
         }
 
         // Process each acceleration record
@@ -842,7 +829,7 @@ fn create_accel_records_table(data: &[SeriesDataRef]) -> CreateAccelRecordsTable
                     ui.add(egui::Label::new(&row.5).wrap()); // Название ускорения
                     ui.add(egui::Label::new(&row.6).wrap()); // M
                     ui.add(egui::Label::new(&row.7).wrap()); // Параметры ускорения
-                    // S_n ряда
+                                                             // S_n ряда
                     if row.8.is_empty() {
                         ui.add(egui::Label::new("(нет точек)").wrap());
                     } else {
@@ -1112,9 +1099,9 @@ impl FilteredData {
         let mut updated = false;
         ui.heading("Быстрые фильтры");
         ui.add_space(5.0);
-        
+
         let mut first_group = true;
-        
+
         // Helper function to add separator between groups
         let mut add_separator = |ui: &mut Ui| {
             if !first_group {
@@ -1123,7 +1110,7 @@ impl FilteredData {
                 first_group = false;
             }
         };
-        
+
         // Precision group
         if !available_filters.precisions.is_empty() {
             add_separator(ui);
@@ -1142,7 +1129,7 @@ impl FilteredData {
                 }
             });
         }
-        
+
         // Series group
         if !available_filters.base_series.is_empty() {
             add_separator(ui);
@@ -1161,7 +1148,7 @@ impl FilteredData {
                 }
             });
         }
-        
+
         // Acceleration group
         if !available_filters.base_accel.is_empty() {
             add_separator(ui);
@@ -1180,7 +1167,7 @@ impl FilteredData {
                 }
             });
         }
-        
+
         // M values group
         if !available_filters.m_values.is_empty() {
             add_separator(ui);
@@ -1199,7 +1186,7 @@ impl FilteredData {
                 }
             });
         }
-        
+
         // Series parameters groups
         for (param_name, values) in &available_filters.series_params {
             add_separator(ui);
@@ -1232,7 +1219,7 @@ impl FilteredData {
                 }
             });
         }
-        
+
         // Acceleration parameters groups
         for (param_name, values) in &available_filters.accel_params {
             add_separator(ui);
@@ -1265,7 +1252,7 @@ impl FilteredData {
                 }
             });
         }
-        
+
         ui.add_space(5.0);
         return updated;
     }
