@@ -318,16 +318,16 @@ fn to_complex<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<Option<ComplexNumb
             if let (Ok(real), Ok(imag)) = (to_str("", real), to_str("", imag)) {
                 let mut res = Vec::new();
                 for (i, (real, imag)) in real.into_iter().zip(imag).enumerate() {
-                    res.push(if v.is_null(i) {
-                        None
-                    } else {
+                    res.push(if let Some(real) = real {
                         Some(ComplexNumber {
-                            real: parse_scientific(real.context("real is null")?)?,
+                            real: parse_scientific(real)?,
                             imag: imag
                                 .map(|x| parse_scientific(x))
                                 .transpose()?
                                 .unwrap_or(Scientific(0.0, 0)),
                         })
+                    } else {
+                        None
                     })
                 }
                 return Ok(res);
@@ -347,11 +347,9 @@ fn to_series_point<'a>(name: &str, v: &'a dyn Array) -> Result<Vec<SeriesPoint>>
             v.column_by_name("value"),
             v.column_by_name("deviation"),
         ) {
-            if let (Ok(n), Ok(value), Ok(deviation)) = (
-                to_i64("", n),
-                to_complex("", value),
-                to_str("", deviation),
-            ) {
+            if let (Ok(n), Ok(value), Ok(deviation)) =
+                (to_i64("", n), to_complex("", value), to_str("", deviation))
+            {
                 let mut res = Vec::new();
                 for ((n, value), deviation) in n.into_iter().zip(value).zip(deviation) {
                     res.push(SeriesPoint {
